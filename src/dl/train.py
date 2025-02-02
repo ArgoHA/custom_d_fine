@@ -62,7 +62,7 @@ class Trainer:
         self.to_visualize_eval = cfg.train.to_visualize_eval
         self.amp_enabled = cfg.train.amp_enabled
         self.clip_max_norm = cfg.train.clip_max_norm
-        self.b_accum_steps = min(cfg.train.b_accum_steps, 1)
+        self.b_accum_steps = max(cfg.train.b_accum_steps, 1)
 
         wandb.init(
             project=cfg.project_name,
@@ -309,7 +309,7 @@ class Trainer:
                             self.optimizer.step()
                             self.scheduler.step()
 
-                    if self.ema_model:
+                    if self.ema_model and batch_idx % self.b_accum_steps == 0:
                         self.ema_model.update(cur_iter, self.model)
 
                     losses.append(loss.item())
