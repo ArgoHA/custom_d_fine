@@ -275,8 +275,6 @@ class Trainer:
                         for t in targets
                     ]
 
-                    if batch_idx % self.b_accum_steps == 0:
-                        self.optimizer.zero_grad(set_to_none=True)
                     lr = self.optimizer.param_groups[0]["lr"]
 
                     if self.amp_enabled:
@@ -285,29 +283,29 @@ class Trainer:
 
                         self.scaler.scale(loss).backward()
 
-                        if self.clip_max_norm:
-                            self.scaler.unscale_(self.optimizer)
-                            torch.nn.utils.clip_grad_norm_(
-                                self.model.parameters(), self.clip_max_norm
-                            )
-
                         if (batch_idx + 1) % self.b_accum_steps == 0:
+                            if self.clip_max_norm:
+                                self.scaler.unscale_(self.optimizer)
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.model.parameters(), self.clip_max_norm
+                                )
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
                             self.scheduler.step()
+                            self.optimizer.zero_grad()
 
                     else:
                         loss = self._pred_and_loss(inputs, targets)
                         loss.backward()
 
-                        if self.clip_max_norm:
-                            torch.nn.utils.clip_grad_norm_(
-                                self.model.parameters(), self.clip_max_norm
-                            )
-
                         if (batch_idx + 1) % self.b_accum_steps == 0:
+                            if self.clip_max_norm:
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.model.parameters(), self.clip_max_norm
+                                )
                             self.optimizer.step()
                             self.scheduler.step()
+                            self.optimizer.zero_grad()
 
                     if self.ema_model and batch_idx % self.b_accum_steps == 0:
                         self.ema_model.update(cur_iter, self.model)
