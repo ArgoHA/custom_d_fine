@@ -58,6 +58,7 @@ models = {
             "weight_dict": {"cost_class": 2, "cost_bbox": 5, "cost_giou": 2},
             "alpha": 0.25,
             "gamma": 2.0,
+            "use_focal_loss": True,
         },
     },
 }
