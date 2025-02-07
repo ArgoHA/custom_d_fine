@@ -1,5 +1,5 @@
-project_name: digital_tampering # for wandb
-exp_name: keep_ratio
+project_name: hw # for wandb
+exp_name: scheduler_pipeline_cleaned_full_data
 
 exp: ${exp_name}_${now_dir}
 
@@ -7,20 +7,20 @@ model_name: m # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/Veryfi/dt # project root with dataset and outputs
+  root: /home/argo/Desktop/Projects/Veryfi/detector # project root with dataset and outputs
   pretrained_model_path: pretrained/dfine_m_coco.pth # dfine_m_obj2coco.pth
 
   data_path: ${train.root}/data/dataset # path to dataset
-  path_to_test_data: ${train.root}/data/dt_test
+  path_to_test_data: ${train.root}/data/test
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
   ### Configs ###
   device: cuda
-  label_to_name: {0: dt}
+  label_to_name: {0: hw, 1: tamper}
   use_one_class: False
 
   img_size: [960, 960] # (h, w)
-  keep_ratio: True # image aspect ratio, if True - image will be padded
+  keep_ratio: False # image aspect ratio, if True - image will be padded
   to_visualize_eval: True # save images with gt and preds
   debug_img_processing: True # save images after preprocessing
 
@@ -29,7 +29,7 @@ train:
 
   batch_size: 8 # physical, should fit on the device
   b_accum_steps: 4 # use batch accumulation x * batch size. >= 1
-  epochs: 45
+  epochs: 50
   ignore_background_epochs: 0 # background images are not used for first N epochs
   num_workers: 4
 
@@ -65,7 +65,7 @@ train:
     blur: 0.01
     gamma: 0.02
     brightness: 0.02
-    noise: 0.02
+    noise: 0.01
 
   ### Reproducibility ###
   seed: 42

@@ -5,30 +5,48 @@ import hydra
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from src.dl.utils import abs_xyxy_to_norm_xywh
+from src.dl.utils import abs_xyxy_to_norm_xywh, vis_one_box
 from src.infer.torch_model import Torch_model
 
 
+def visualize(img, boxes, labels, scores, output_path, img_path):
+    output_path.mkdir(parents=True, exist_ok=True)
+    for box, label, score in zip(boxes, labels, scores):
+        vis_one_box(img, box, label, mode="pred", score=score)
+
+    cv2.imwrite((str(f"{output_path / Path(img_path).stem}.jpg")), img)
+
+
 def save_yolo_annotations(res, output_path, img_path, img_shape):
+    output_path.mkdir(parents=True, exist_ok=True)
     with open(output_path / Path(img_path).with_suffix(".txt"), "a") as f:
-        for class_id, box in zip(res["class_ids"], res["boxes"]):
+        for class_id, box in zip(res["labels"], res["boxes"]):
             norm_box = abs_xyxy_to_norm_xywh(box[None], img_shape[0], img_shape[1])[0]
             f.write(f"{int(class_id)} {norm_box[0]} {norm_box[1]} {norm_box[2]} {norm_box[3]}\n")
 
 
 def run(torch_model, folder_path, output_path):
+    batch = 0
     imag_paths = [img.name for img in folder_path.iterdir() if not str(img).startswith(".")]
-    class_ids = set()
+    labels = set()
     for img_path in tqdm(imag_paths):
         img = cv2.imread(str(folder_path / img_path))
         res = torch_model(img)
 
-        for class_id in res["class_ids"]:
-            class_ids.add(class_id)
-            save_yolo_annotations(res, output_path, img_path, img.shape)
+        res = {
+            "boxes": res[batch]["boxes"],
+            "labels": res[batch]["labels"],
+            "scores": res[batch]["scores"],
+        }
+
+        visualize(img, res["boxes"], res["labels"], res["scores"], output_path / "images", img_path)
+
+        for class_id in res["labels"]:
+            labels.add(class_id)
+            save_yolo_annotations(res, output_path / "labels", img_path, img.shape)
 
     with open(output_path / "labels.txt", "w") as f:
-        for class_id in class_ids:
+        for class_id in labels:
             f.write(f"{int(class_id)}\n")
 
 
@@ -44,11 +62,11 @@ def main(cfg: DictConfig):
         iou_thresh=cfg.train.iou_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
+        # device="cpu",
     )
 
-    folder_path = Path(cfg.train.data_path).parent / "auto_annotate"
-    output_path = Path("output") / "auto_annotate"
-    output_path.mkdir(parents=True, exist_ok=True)
+    folder_path = Path(cfg.train.data_path).parent / "dt_test"
+    output_path = Path(cfg.train.root) / "output" / "auto_annotate"
 
     run(torch_model, folder_path, output_path)
 

@@ -1,10 +1,10 @@
 import math
 from typing import List
 
-from loguru import logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from loguru import logger
 from torch import Tensor
 from torchvision.ops.boxes import box_area
 

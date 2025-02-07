@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple
 import hydra
 import numpy as np
 import torch
+import torch.nn.functional as F
 import wandb
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
@@ -16,13 +17,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.d_fine.dfine import build_loss, build_model, build_optimizer
-from src.d_fine.postprocess import DFINEPostProcessor
 from src.dl.dataset import Loader
 from src.dl.utils import (
     calculate_remaining_time,
     filter_preds,
+    get_vram_usage,
     log_metrics_locally,
-    norm_xywh_to_abs_xyxy,
+    process_boxes,
     save_metrics,
     set_seeds,
     visualize,
@@ -57,12 +58,13 @@ class Trainer:
         self.iou_thresh = cfg.train.iou_thresh
         self.epochs = cfg.train.epochs
         self.no_mosaic_epochs = cfg.train.mosaic_augs.no_mosaic_epochs
-        self.warmup_epochs = cfg.train.warmup_epochs
+        self.ignore_background_epochs = cfg.train.ignore_background_epochs
         self.path_to_save = Path(cfg.train.path_to_save)
         self.to_visualize_eval = cfg.train.to_visualize_eval
         self.amp_enabled = cfg.train.amp_enabled
         self.clip_max_norm = cfg.train.clip_max_norm
         self.b_accum_steps = max(cfg.train.b_accum_steps, 1)
+        self.keep_ratio = cfg.train.keep_ratio
 
         wandb.init(
             project=cfg.project_name,
@@ -90,7 +92,7 @@ class Trainer:
             debug_img_processing=cfg.train.debug_img_processing,
         )
         self.train_loader, self.val_loader, self.test_loader = base_loader.build_dataloaders()
-        if self.warmup_epochs:
+        if self.ignore_background_epochs:
             self.train_loader.dataset.ignore_background = True
 
         self.model = build_model(
@@ -125,11 +127,62 @@ class Trainer:
         if self.amp_enabled:
             self.scaler = GradScaler()
 
-        self.postprocess = DFINEPostProcessor(num_classes=num_labels, use_focal_loss=True)
-
         wandb.watch(self.model)
 
-    @torch.no_grad
+    def preds_postprocess(
+        self,
+        inputs,
+        outputs,
+        orig_sizes,
+        num_top_queries=300,
+        use_focal_loss=True,
+    ) -> List[Dict[str, torch.Tensor]]:
+        """
+        returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
+        """
+        logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
+        boxes = process_boxes(
+            boxes, inputs.shape[2:], orig_sizes, self.keep_ratio, inputs.device
+        )  # B x TopQ x 4
+
+        if use_focal_loss:
+            scores = F.sigmoid(logits)
+            scores, index = torch.topk(scores.flatten(1), num_top_queries, dim=-1)
+            labels = index - index // num_labels * num_labels
+            index = index // num_labels
+            boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+        else:
+            scores = F.softmax(logits)[:, :, :-1]
+            scores, labels = scores.max(dim=-1)
+            if scores.shape[1] > num_top_queries:
+                scores, index = torch.topk(scores, num_top_queries, dim=-1)
+                labels = torch.gather(labels, dim=1, index=index)
+                boxes = torch.gather(
+                    boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1])
+                )
+
+        results = []
+        for lab, box, sco in zip(labels, boxes, scores):
+            result = dict(labels=lab, boxes=box, scores=sco)
+            results.append(result)
+        return results
+
+    def gt_postprocess(self, inputs, targets, orig_sizes):
+        results = []
+        for idx, target in enumerate(targets):
+            lab = target["labels"]
+            box = process_boxes(
+                target["boxes"][None],
+                inputs[idx].shape[1:],
+                orig_sizes[idx][None],
+                self.keep_ratio,
+                inputs.device,
+            )
+            result = dict(labels=lab, boxes=box.squeeze(0))
+            results.append(result)
+        return results
+
+    @torch.no_grad()
     def get_preds_and_gt(
         self, val_loader: DataLoader
     ) -> Tuple[List[Dict[str, torch.Tensor]], List[Dict[str, torch.Tensor]]]:
@@ -137,7 +190,7 @@ class Trainer:
         Outputs gt and preds. Each is a List of dicts. 1 dict = 1 image.
 
         """
-        gt, preds = [], []
+        all_gt, all_preds = [], []
         model = self.model
         if self.ema_model:
             model = self.ema_model.model
@@ -145,7 +198,11 @@ class Trainer:
         model.eval()
         for idx, (inputs, targets, img_paths) in enumerate(val_loader):
             inputs = inputs.to(self.device)
-            raw_res = model(inputs)
+            if self.amp_enabled:
+                with autocast(self.device, cache_enabled=True):
+                    raw_res = model(inputs)
+            else:
+                raw_res = model(inputs)
 
             targets = [
                 {
@@ -154,46 +211,26 @@ class Trainer:
                 }
                 for t in targets
             ]
-            orig_target_sizes = (
+            orig_sizes = (
                 torch.stack([t["orig_size"] for t in targets], dim=0).float().to(self.device)
             )
 
-            output = self.postprocess(raw_res, orig_target_sizes)
+            preds = self.preds_postprocess(inputs, raw_res, orig_sizes)
+            gt = self.gt_postprocess(inputs, targets, orig_sizes)
 
-            for i in range(len(targets)):
-                gt.append(
-                    {
-                        "boxes": torch.tensor(
-                            norm_xywh_to_abs_xyxy(
-                                targets[i]["boxes"].cpu(),
-                                orig_target_sizes[i][1].cpu(),
-                                orig_target_sizes[i][0].cpu(),
-                            ),
-                        ).to(self.device),
-                        "labels": targets[i]["labels"].int(),  # shape [num_gt_i]
-                    }
-                )
-                preds.append(
-                    {
-                        "boxes": output[i]["boxes"],
-                        "labels": output[i]["labels"].int(),
-                        "scores": output[i]["scores"],
-                    }
-                )
+            for pred_instance, gt_instance in zip(preds, gt):
+                all_preds.append(pred_instance)
+                all_gt.append(gt_instance)
 
             if not idx and self.to_visualize_eval:
-                batch_gt = gt[-len(targets) :]  # the last N items appended
-                batch_preds = preds[-len(targets) :]  # the last N items appended
-
                 visualize(
                     img_paths,
-                    batch_gt,
-                    filter_preds(batch_preds, self.conf_thresh),
+                    gt,
+                    filter_preds(preds, self.conf_thresh),
                     dataset_path=Path(self.cfg.train.data_path) / "images",
                     path_to_save=Path(self.cfg.train.root) / "output" / "eval_preds",
                 )
-
-        return gt, preds
+        return all_gt, all_preds
 
     @staticmethod
     def get_metrics(
@@ -244,12 +281,6 @@ class Trainer:
             torch.save(model_to_save.state_dict(), self.path_to_save / "model.pt")
         return best_metric
 
-    def _pred_and_loss(self, inputs, targets):
-        output = self.model(inputs, targets=targets)
-        loss_dict = self.loss_fn(output, targets)
-        loss = sum(loss_dict.values())
-        return loss
-
     def train(self) -> None:
         best_metric = 0
         cur_iter = 0
@@ -257,14 +288,15 @@ class Trainer:
         for epoch in range(1, self.epochs + 1):
             epoch_start_time = time.time()
             self.model.train()
+            self.loss_fn.train()
             losses = []
 
             with tqdm(self.train_loader, unit="batch") as tepoch:
                 for batch_idx, (inputs, targets, _) in enumerate(tepoch):
                     tepoch.set_description(f"Epoch {epoch}/{self.epochs}")
-                    cur_iter += 1
                     if inputs is None:
                         continue
+                    cur_iter += 1
 
                     inputs = inputs.to(self.device)
                     targets = [
@@ -278,8 +310,11 @@ class Trainer:
                     lr = self.optimizer.param_groups[0]["lr"]
 
                     if self.amp_enabled:
-                        with autocast(self.device, dtype=torch.bfloat16):
-                            loss = self._pred_and_loss(inputs, targets)
+                        with autocast(self.device, cache_enabled=True):
+                            output = self.model(inputs, targets=targets)
+                        with autocast(self.device, enabled=False):
+                            loss_dict = self.loss_fn(output, targets)
+                        loss = sum(loss_dict.values())
 
                         self.scaler.scale(loss).backward()
 
@@ -295,7 +330,9 @@ class Trainer:
                             self.optimizer.zero_grad()
 
                     else:
-                        loss = self._pred_and_loss(inputs, targets)
+                        output = self.model(inputs, targets=targets)
+                        loss_dict = self.loss_fn(output, targets)
+                        loss = sum(loss_dict.values())
                         loss.backward()
 
                         if (batch_idx + 1) % self.b_accum_steps == 0:
@@ -322,6 +359,7 @@ class Trainer:
                             cur_iter,
                             len(self.train_loader),
                         ),
+                        vram=f"{get_vram_usage()}%",
                     )
 
             wandb.log({"lr": lr, "epoch": epoch})
@@ -342,7 +380,7 @@ class Trainer:
             ):
                 self.train_loader.dataset.close_mosaic()
 
-            if epoch == self.warmup_epochs:
+            if epoch == self.ignore_background_epochs:
                 self.train_loader.dataset.ignore_background = False
                 logger.info("Including background images")
 

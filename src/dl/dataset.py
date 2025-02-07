@@ -19,6 +19,7 @@ from src.dl.utils import (
     norm_xywh_to_abs_xyxy,
     random_affine,
     seed_worker,
+    vis_one_box,
 )
 from src.ptypes import class_names, img_norms
 
@@ -47,6 +48,9 @@ class CustomDataset(Dataset):
         self.translate = cfg.train.mosaic_augs.translate
         self.shear = cfg.train.mosaic_augs.shear
         self.keep_ratio = cfg.train.keep_ratio
+        self.use_one_class = cfg.train.use_one_class
+
+        self.cases_to_debug = 20
 
         self._init_augs(cfg)
 
@@ -58,8 +62,9 @@ class CustomDataset(Dataset):
                     min_height=self.target_h,
                     min_width=self.target_w,
                     border_mode=cv2.BORDER_CONSTANT,
-                    value=(114, 114, 114),
+                    fill=(114, 114, 114),
                 ),
+                A.CenterCrop(self.target_h, self.target_w),
             ]
         else:
             resize = [A.Resize(self.target_h, self.target_w)]
@@ -74,7 +79,7 @@ class CustomDataset(Dataset):
                 A.RandomBrightnessContrast(p=cfg.train.augs.brightness),
                 A.RandomGamma(p=cfg.train.augs.gamma),
                 A.Blur(p=cfg.train.augs.blur),
-                A.GaussNoise(p=cfg.train.augs.noise),
+                A.GaussNoise(p=cfg.train.augs.noise, std_range=(0.1, 0.2)),
                 A.ToGray(p=cfg.train.augs.to_gray),
                 A.Affine(
                     rotate=[90, 90],
@@ -89,16 +94,10 @@ class CustomDataset(Dataset):
                 augs + resize + norm,
                 bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
             )
-        elif self.mode in ["val", "test"]:
+        elif self.mode in ["val", "test", "bench"]:
             self.mosaic_prob = 0
             self.transform = A.Compose(
                 resize + norm,
-                bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
-            )
-        elif self.mode == "bench":
-            self.mosaic_prob = 0
-            self.transform = A.Compose(
-                norm,
                 bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
             )
         else:
@@ -122,22 +121,13 @@ class CustomDataset(Dataset):
 
         # Convert pixel values from [0, 1] to [0, 255]
         image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
+        image_np = np.ascontiguousarray(image_np)
 
         # Draw bounding boxes and class IDs
         boxes_np = boxes.cpu().numpy().astype(int)
         classes_np = classes.cpu().numpy()
-        for box, cls in zip(boxes_np, classes_np):
-            x_min, y_min, x_max, y_max = box
-            cv2.rectangle(image_np, (x_min, y_min), (x_max, y_max), color=(0, 255, 0), thickness=2)
-            cv2.putText(
-                image_np,
-                str(cls),
-                (x_min, y_min - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 0),
-                2,
-            )
+        for box, class_id in zip(boxes_np, classes_np):
+            vis_one_box(image_np, box, class_id, mode="gt")
 
         # Save the image
         save_dir = self.root_path.parent.parent / "output" / "debug_images" / self.mode
@@ -154,7 +144,7 @@ class CustomDataset(Dataset):
         image = cv2.imread(str(self.root_path / "images" / f"{image_path}"))  # BGR, HWC
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # RGB, HWC
         height, width, _ = image.shape
-        orig_size = torch.tensor([width, height])
+        orig_size = torch.tensor([height, width])
 
         # Get labels
         labels_path = self.root_path / "labels" / f"{image_path.stem}.txt"
@@ -162,6 +152,10 @@ class CustomDataset(Dataset):
             targets = np.loadtxt(labels_path)
             if targets.ndim == 1:  # Handle the case with only one object
                 targets = targets.reshape(1, -1)
+
+            if self.use_one_class:
+                targets[:, 0] = 0
+
             targets[:, 1:] = norm_xywh_to_abs_xyxy(targets[:, 1:], height, width).astype(np.float32)
             return image, targets, orig_size
         targets = np.zeros((1, 5), dtype=np.float32)
@@ -218,7 +212,7 @@ class CustomDataset(Dataset):
             mosaic_img,
             mosaic_targets,
             segments=[],
-            target_size=(self.target_h, self.target_w),
+            target_size=(self.target_w, self.target_h),
             degrees=self.degrees,
             translate=self.translate,
             scales=self.mosaic_scale,
@@ -246,12 +240,12 @@ class CustomDataset(Dataset):
         else:
             image, targets, orig_size = self._get_data(idx)  # boxes in abs xyxy format
 
-            if self.ignore_background and np.all(targets[:, 0] == 0):
+            if self.ignore_background and np.all(targets == 0):
                 return None
 
             box_heights = targets[:, 3] - targets[:, 1]
             box_widths = targets[:, 4] - targets[:, 2]
-            targets = targets[np.minimum(box_heights, box_widths) > 1]
+            targets = targets[np.minimum(box_heights, box_widths) > 0]
 
             # Apply transformations
             transformed = self.transform(
@@ -261,7 +255,7 @@ class CustomDataset(Dataset):
             boxes = torch.tensor(transformed["bboxes"], dtype=torch.float32)
             labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
 
-        if self.debug_img_processing and idx < 10:
+        if self.debug_img_processing and idx < self.cases_to_debug:
             self._debug_image(idx, image, boxes, labels, image_path)
 
         # return back to normalized format for model
@@ -289,6 +283,7 @@ class Loader:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.cfg = cfg
+        self.use_one_class = cfg.train.use_one_class
         self.debug_img_processing = debug_img_processing
         self._get_splits()
         self.class_names = class_names
@@ -303,8 +298,28 @@ class Loader:
             else:
                 self.splits[split_name] = []
 
+    # def _get_label_stats(self) -> Dict:
+    #     classes = {class_name: 0 for class_name in self.class_names}
+    #     for split in self.splits.values():
+    #         if not np.any(split):
+    #             continue
+    #         for image_path in split.iloc[:, 0]:
+    #             labels_path = self.root_path / "labels" / f"{Path(image_path).stem}.txt"
+    #             if not (labels_path.exists() and labels_path.stat().st_size):
+    #                 continue
+    #             targets = np.loadtxt(labels_path)
+    #             if targets.ndim == 1:
+    #                 targets = targets.reshape(1, -1)
+    #             labels = targets[:, 0]
+    #             for class_id in labels:
+    #                 classes[self.class_names[int(class_id)]] += 1
+    #     return classes
+
     def _get_label_stats(self) -> Dict:
-        classes = {class_name: 0 for class_name in self.class_names}
+        if self.use_one_class:
+            classes = {"target": 0}
+        else:
+            classes = {class_name: 0 for class_name in self.class_names}
         for split in self.splits.values():
             if not np.any(split):
                 continue
@@ -315,9 +330,12 @@ class Loader:
                 targets = np.loadtxt(labels_path)
                 if targets.ndim == 1:
                     targets = targets.reshape(1, -1)
-                class_ids = targets[:, 0]
-                for class_id in class_ids:
-                    classes[self.class_names[int(class_id)]] += 1
+                labels = targets[:, 0]
+                for class_id in labels:
+                    if self.use_one_class:
+                        classes["target"] += 1
+                    else:
+                        classes[self.class_names[int(class_id)]] += 1
         return classes
 
     def _get_amount_of_background(self):
@@ -387,7 +405,7 @@ class Loader:
     @staticmethod
     def collate_fn(batch) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         """
-        Input: List[Tuple[Tensor[channel, height, width], Tensor[class_ids], Tensor[boxes]], ...]
+        Input: List[Tuple[Tensor[channel, height, width], Tensor[labels], Tensor[boxes]], ...]
         where each tuple is a an item in a batch...]
         """
         if None in batch:

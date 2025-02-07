@@ -7,11 +7,12 @@ Check config.yaml for configs
 ## Usage
 To run the scripts, use the following commands:
 ```bash
-python -m src.etl.preprocess   # Converts images and PDFs to JPG format
-python -m src.etl.split        # Creates train, validation, and test CSVs with image paths
-python -m src.dl.train         # Runs the training pipeline
-python -m src.dl.export        # Exports weights in various formats after training
-python -m src.dl.bench         # Runs all exported models on the test set
+python -m src.etl.preprocess    # Converts images and PDFs to JPG format
+python -m src.etl.split         # Creates train, validation, and test CSVs with image paths
+python -m src.dl.train          # Runs the training pipeline
+python -m src.dl.export         # Exports weights in various formats after training
+python -m src.dl.bench          # Runs all exported models on the test set
+python -m src.dl.auto_annotate  # Runs model ontest folder, saves visualisations and txt preds
 
 python -m src.dl.subm          # Creates a submition file for DL Enigma Kaggle challenge
 ```
@@ -26,6 +27,7 @@ Use inference classes in `src/infer`. Currently available:
 - **Debug images**: Preprocessed images (including augmentations) are saved at `output/debug_images/split` as they are fed into the model (except for normalization).
 - **Evaluation predicts**: Visualised model's predictions on val set. Includes GT as green and preds as blue.
 - **Bench images**: Visualised model's predictions with inference class. Uses all exported models
+- **Auto annotate**: Visualised model's predictions and predicted annotations in yolo txt format
 
 ## Results examples
 **Train**
@@ -66,9 +68,10 @@ Use inference classes in `src/infer`. Currently available:
 - WandB integration
 
 ## TODO
+- Implement multiscale aug
 - Batch inference
 - Add other model sizes
-- Add ONNX and OpenVino inference classes
+- Add OpenVino inference class, refactor postprocessing of existing ones
 - Fix visualizations when ratio is kept
 - Finetune with layers freeze
 - Add support for cashing in dataset

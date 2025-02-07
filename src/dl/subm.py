@@ -47,7 +47,7 @@ def run(model, folder_path):
         boxes = abs_xyxy_to_norm_xywh(res["boxes"], img.shape[0], img.shape[1])
 
         tmp_pred = []
-        for i, (class_id, box) in enumerate(zip(res["class_ids"], boxes)):
+        for i, (class_id, box) in enumerate(zip(res["labels"], boxes)):
             x_center, y_center, width, height = box
             x1 = float(x_center) - (float(width) / 2)
             y1 = float(y_center) - (float(height) / 2)

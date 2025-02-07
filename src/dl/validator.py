@@ -88,22 +88,22 @@ class Validator:
             gt_labels = gt["labels"]
 
             # isolate each class
-            class_ids = torch.unique(torch.cat([pred_labels, gt_labels]))
-            for cl_id in class_ids:
-                pred_cl_boxes = pred_boxes[pred_labels == cl_id]  # filter by bool mask
-                gt_cl_boxes = gt_boxes[gt_labels == cl_id]
+            labels = torch.unique(torch.cat([pred_labels, gt_labels]))
+            for label in labels:
+                pred_cl_boxes = pred_boxes[pred_labels == label]  # filter by bool mask
+                gt_cl_boxes = gt_boxes[gt_labels == label]
 
                 n_preds = len(pred_cl_boxes)
                 n_gts = len(gt_cl_boxes)
                 if not (n_preds or n_gts):
                     continue
                 if not n_preds:
-                    metrics_per_class[cl_id.item()]["FNs"] += n_gts
-                    metrics_per_class[cl_id.item()]["IoUs"].extend([0] * n_gts)
+                    metrics_per_class[label.item()]["FNs"] += n_gts
+                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
                     continue
                 if not n_gts:
-                    metrics_per_class[cl_id.item()]["FPs"] += n_preds
-                    metrics_per_class[cl_id.item()]["IoUs"].extend([0] * n_preds)
+                    metrics_per_class[label.item()]["FPs"] += n_preds
+                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
                     continue
 
                 ious = box_iou(pred_cl_boxes, gt_cl_boxes)  # matrix of all IoUs
@@ -113,10 +113,10 @@ class Validator:
                 pred_indices, gt_indices = torch.nonzero(ious_mask, as_tuple=True)
 
                 if not pred_indices.numel():  # no predicts matched gts
-                    metrics_per_class[cl_id.item()]["FNs"] += n_gts
-                    metrics_per_class[cl_id.item()]["IoUs"].extend([0] * n_gts)
-                    metrics_per_class[cl_id.item()]["FPs"] += n_preds
-                    metrics_per_class[cl_id.item()]["IoUs"].extend([0] * n_preds)
+                    metrics_per_class[label.item()]["FNs"] += n_gts
+                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
+                    metrics_per_class[label.item()]["FPs"] += n_preds
+                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
                     continue
 
                 iou_values = ious[pred_indices, gt_indices]
@@ -133,15 +133,15 @@ class Validator:
                     if gt_idx.item() not in matched_gts and pred_idx.item() not in matched_preds:
                         matched_preds.add(pred_idx.item())
                         matched_gts.add(gt_idx.item())
-                        metrics_per_class[cl_id.item()]["TPs"] += 1
-                        metrics_per_class[cl_id.item()]["IoUs"].append(iou.item())
+                        metrics_per_class[label.item()]["TPs"] += 1
+                        metrics_per_class[label.item()]["IoUs"].append(iou.item())
 
                 unmatched_preds = set(range(n_preds)) - matched_preds
                 unmatched_gts = set(range(n_gts)) - matched_gts
-                metrics_per_class[cl_id.item()]["FPs"] += len(unmatched_preds)
-                metrics_per_class[cl_id.item()]["IoUs"].extend([0] * len(unmatched_preds))
-                metrics_per_class[cl_id.item()]["FNs"] += len(unmatched_gts)
-                metrics_per_class[cl_id.item()]["IoUs"].extend([0] * len(unmatched_gts))
+                metrics_per_class[label.item()]["FPs"] += len(unmatched_preds)
+                metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_preds))
+                metrics_per_class[label.item()]["FNs"] += len(unmatched_gts)
+                metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_gts))
         return metrics_per_class
 
     def _compute_metrics_and_confusion_matrix(self, preds):

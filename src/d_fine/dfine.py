@@ -92,10 +92,15 @@ def build_optimizer(model, lr, betas, weight_decay, base_lr):
         else:
             rest.append(param)
 
-    group1 = {"params": backbone_exclude_norm, "lr": base_lr}
-    group2 = {"params": backbone_norm, "lr": base_lr, "weight_decay": 0.0}
-    group3 = {"params": encdec_norm_bias, "weight_decay": 0.0}
-    group4 = {"params": rest}
+    group1 = {"params": backbone_exclude_norm, "lr": base_lr / 10, "initial_lr": base_lr / 10}
+    group2 = {
+        "params": backbone_norm,
+        "lr": base_lr / 10,
+        "weight_decay": 0.0,
+        "initial_lr": base_lr / 10,
+    }
+    group3 = {"params": encdec_norm_bias, "weight_decay": 0.0, "lr": base_lr, "initial_lr": base_lr}
+    group4 = {"params": rest, "lr": base_lr, "initial_lr": base_lr}
 
     param_groups = [group1, group2, group3, group4]
 

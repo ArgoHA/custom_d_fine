@@ -1,6 +1,7 @@
 import math
 import os
 import random
+import subprocess
 import time
 from pathlib import Path
 from shutil import rmtree
@@ -93,6 +94,19 @@ def calculate_remaining_time(
     return f"{int(hours):02}:{int(minutes):02}"
 
 
+def get_vram_usage():
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,nounits,noheader"],
+            encoding="utf-8",
+        )
+        used, total = map(float, output.strip().split(", "))
+        return round((used / total) * 100)
+    except Exception as e:
+        print(f"Error running nvidia-smi: {e}")
+        return 0
+
+
 def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int) -> np.ndarray:
     # Convert normalized centers to absolute pixel coordinates
     x_center = boxes[:, 0] * width
@@ -107,11 +121,18 @@ def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int) -> np.ndar
     y_max = y_center + (box_height / 2)
 
     # Convert coordinates to integers
-    x_min = np.maximum(np.floor(x_min), 1)
-    y_min = np.maximum(np.floor(y_min), 1)
-    x_max = np.minimum(np.ceil(x_max), width - 1)
-    y_max = np.minimum(np.ceil(y_max), height - 1)
-    return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    if isinstance(boxes, np.ndarray):
+        x_min = np.maximum(np.floor(x_min), 1)
+        y_min = np.maximum(np.floor(y_min), 1)
+        x_max = np.minimum(np.ceil(x_max), width - 1)
+        y_max = np.minimum(np.ceil(y_max), height - 1)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    elif isinstance(boxes, torch.Tensor):
+        x_min = torch.clamp(torch.floor(x_min), min=1)
+        y_min = torch.clamp(torch.floor(y_min), min=1)
+        x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
+        y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
+        return torch.stack([x_min, y_min, x_max, y_max], dim=1)
 
 
 def abs_xyxy_to_norm_xywh(boxes: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -269,6 +290,35 @@ def filter_preds(preds, conf_thresh):
     return preds
 
 
+def vis_one_box(img, box, label, mode, score=None):
+    if mode == "gt":
+        prefix = "GT: "
+        color = (46, 153, 60)
+        postfix = ""
+    elif mode == "pred":
+        prefix = ""
+        color = (148, 70, 44)
+        postfix = f" {score:.2f}"
+
+    x1, y1, x2, y2 = map(int, box.tolist())
+    cv2.rectangle(
+        img,
+        (x1, y1),
+        (x2, y2),
+        color=color,
+        thickness=2,
+    )
+    cv2.putText(
+        img,
+        f"{prefix}{label_to_name_mapping[int(label)]}{postfix}",
+        (x1, max(0, y1 - 5)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        color,
+        thickness=1,
+    )
+
+
 def visualize(img_paths, gt, preds, dataset_path, path_to_save):
     """
     Saves images with drawn bounding boxes.
@@ -284,46 +334,125 @@ def visualize(img_paths, gt, preds, dataset_path, path_to_save):
         # Draw ground-truth boxes (green)
         for box, label in zip(gt_dict["boxes"], gt_dict["labels"]):
             # box: [x1, y1, x2, y2]
-            x1, y1, x2, y2 = map(int, box.tolist())
-            cv2.rectangle(
-                img,
-                (x1, y1),
-                (x2, y2),
-                color=(0, 255, 0),  # green in BGR
-                thickness=2,
-            )
-            # Optionally put the label text above the box
-            cv2.putText(
-                img,
-                f"GT:{label_to_name_mapping[int(label)]}",
-                (x1, max(0, y1 - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                thickness=1,
-            )
+            vis_one_box(img, box, label, mode="gt")
 
         # Draw predicted boxes (blue)
         for box, label, score in zip(pred_dict["boxes"], pred_dict["labels"], pred_dict["scores"]):
-            x1, y1, x2, y2 = map(int, box.tolist())
-            cv2.rectangle(
-                img,
-                (x1, y1),
-                (x2, y2),
-                color=(255, 0, 0),  # blue in BGR
-                thickness=2,
-            )
-            # Optionally put the label & score above the box
-            cv2.putText(
-                img,
-                f"{label_to_name_mapping[int(label)]} {score:.2f}",
-                (x1, max(0, y1 - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 0, 0),
-                thickness=1,
-            )
+            vis_one_box(img, box, label, mode="pred", score=score)
 
         # Construct a filename and save
         outpath = path_to_save / img_path.name
         cv2.imwrite(str(outpath), img)
+
+
+def clip_boxes(boxes, shape):
+    # Clip boxes (xyxy) to image shape (height, width)
+    if isinstance(boxes, torch.Tensor):  # faster individually
+        boxes[..., 0].clamp_(0, shape[1])  # x1
+        boxes[..., 1].clamp_(0, shape[0])  # y1
+        boxes[..., 2].clamp_(0, shape[1])  # x2
+        boxes[..., 3].clamp_(0, shape[0])  # y2
+    else:  # np.array (faster grouped)
+        boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
+        boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
+
+
+def scale_boxes_ratio_kept(boxes, img0_shape, img1_shape, ratio_pad=None, padding=True):
+    # Rescale boxes (xyxy) from img1_shape to img0_shape
+    if ratio_pad is None:  # calculate from img0_shape
+        gain = min(
+            img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1]
+        )  # gain  = old / new
+        pad = (
+            round((img1_shape[1] - img0_shape[1] * gain) / 2 - 0.1),
+            round((img1_shape[0] - img0_shape[0] * gain) / 2 - 0.1),
+        )  # wh padding
+    else:
+        gain = ratio_pad[0][0]
+        pad = ratio_pad[1]
+
+    if padding:
+        boxes[..., [0, 2]] -= pad[0]  # x padding
+        boxes[..., [1, 3]] -= pad[1]  # y padding
+    boxes[..., :4] /= gain
+    clip_boxes(boxes, img0_shape)
+    return boxes
+
+
+def scale_boxes(boxes, orig_shape, resized_shape):
+    scale_x = orig_shape[1] / resized_shape[1]
+    scale_y = orig_shape[0] / resized_shape[0]
+    boxes[:, 0] *= scale_x
+    boxes[:, 2] *= scale_x
+    boxes[:, 1] *= scale_y
+    boxes[:, 3] *= scale_y
+    return boxes
+
+
+# def process_boxes(inputs, boxes, orig_target_sizes, keep_ratio):
+#     current_input_sizes = (
+#         torch.tensor((inputs.shape[-2], inputs.shape[-1]), device=inputs.device)
+#         .unsqueeze(0)
+#         .repeat(inputs.shape[0], 1)
+#     )
+#     boxes = boxes.cpu().numpy()
+#     final_boxes = np.zeros_like(boxes)
+#     for idx, box in enumerate(boxes):
+#         final_boxes[idx] = norm_xywh_to_abs_xyxy(box, *current_input_sizes[idx].cpu().numpy())
+
+#     for i in range(orig_target_sizes.shape[0]):
+#         if keep_ratio:
+#             final_boxes[i] = scale_boxes_ratio_kept(
+#                 final_boxes[i],
+#                 orig_target_sizes[i].cpu().numpy(),
+#                 current_input_sizes[i].cpu().numpy(),
+#             )
+#         else:
+#             final_boxes[i] = scale_boxes(
+#                 final_boxes[i],
+#                 orig_target_sizes[i].cpu().numpy(),
+#                 current_input_sizes[i].cpu().numpy(),
+#             )
+#     return torch.tensor(final_boxes).to(inputs.device)
+
+
+def process_boxes(boxes, processed_size, orig_sizes, keep_ratio, device):
+    """
+    Inputs:
+        boxes: Torch.tensor[batch_size, num_boxes, 4]
+        processed_size: Torch.tensor[2] h, w
+        orig_sizes: Torch.tensor[batch_size, 2] h, w
+        keep_ratio: bool
+        device: Torch.device
+
+    Outputs:
+        Torch.tensor[batch_size, num_boxes, 4]
+
+    """
+    bs = orig_sizes.shape[0]
+    processed_sizes = np.repeat(
+        np.array([processed_size[0], processed_size[1]])[None, :], bs, axis=0
+    )
+    orig_sizes = orig_sizes.cpu().numpy()
+    boxes = boxes.cpu().numpy()
+
+    final_boxes = np.zeros_like(boxes)
+    for idx, box in enumerate(boxes):
+        final_boxes[idx] = norm_xywh_to_abs_xyxy(
+            box, processed_sizes[idx][0], processed_sizes[idx][1]
+        )
+
+    for i in range(bs):
+        if keep_ratio:
+            final_boxes[i] = scale_boxes_ratio_kept(
+                final_boxes[i],
+                orig_sizes[i],
+                processed_sizes[i],
+            )
+        else:
+            final_boxes[i] = scale_boxes(
+                final_boxes[i],
+                orig_sizes[i],
+                processed_sizes[i],
+            )
+    return torch.tensor(final_boxes).to(device)

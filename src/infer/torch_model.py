@@ -1,9 +1,10 @@
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from numpy.typing import NDArray
 
 from src.d_fine.dfine import build_model
@@ -62,10 +63,20 @@ class Torch_model:
             torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu"))
         )
 
+        # self.model_path = (
+        #     "/home/argo/Desktop/Projects/D_FINE/output/dfine_hgnetv2_m_obj2custom/checkpoint0047.pth"
+        # )
         # self.model.load_state_dict(
         #     torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu"))["ema"][
         #         "module"
-        #     ], strict=False
+        #     ],
+        #     strict=False,
+        # )
+        # self.model.load_state_dict(
+        #     torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu"))[
+        #         "model"
+        #     ],
+        #     strict=False,
         # )
 
         if self.half:
@@ -76,6 +87,76 @@ class Torch_model:
     def _test_pred(self):
         random_image = np.random.randint(0, 255, size=(1000, 1110, 3), dtype=np.uint8)
         self.model(self._preprocess(random_image))
+
+    @staticmethod
+    def process_boxes(boxes, processed_size, orig_size, keep_ratio, device):
+        bs = 1
+        processed_sizes = (
+            np.array((processed_size[0], processed_size[1]))[None].repeat(bs, 1)  # bs 1
+        )
+        orig_sizes = (
+            np.array((orig_size[0], orig_size[1]))[None].repeat(bs, 1)  # bs 1
+        )
+
+        boxes = boxes.cpu().numpy()
+        final_boxes = np.zeros_like(boxes)
+        for idx, box in enumerate(boxes):
+            final_boxes[idx] = norm_xywh_to_abs_xyxy(
+                box, processed_sizes[idx][0], processed_sizes[idx][1]
+            )
+
+        for i in range(bs):
+            if keep_ratio:
+                final_boxes[i] = scale_boxes_ratio_kept(
+                    final_boxes[i],
+                    orig_sizes[i],
+                    processed_sizes[i],
+                )
+            else:
+                final_boxes[i] = scale_boxes(
+                    final_boxes[i],
+                    orig_sizes[i],
+                    processed_sizes[i],
+                )
+        return torch.tensor(final_boxes).to(device)
+
+    def preds_postprocess(
+        self,
+        outputs,
+        processed_size,
+        orig_size,
+        num_top_queries=300,
+        use_focal_loss=True,
+    ) -> List[Dict[str, torch.Tensor]]:
+        """
+        returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
+        """
+        logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
+        boxes = self.process_boxes(
+            boxes, processed_size, orig_size, self.keep_ratio, self.device
+        )  # B x TopQ x 4
+
+        if use_focal_loss:
+            scores = F.sigmoid(logits)
+            scores, index = torch.topk(scores.flatten(1), num_top_queries, dim=-1)
+            labels = index - index // self.n_outputs * self.n_outputs
+            index = index // self.n_outputs
+            boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+        else:
+            scores = F.softmax(logits)[:, :, :-1]
+            scores, labels = scores.max(dim=-1)
+            if scores.shape[1] > num_top_queries:
+                scores, index = torch.topk(scores, num_top_queries, dim=-1)
+                labels = torch.gather(labels, dim=1, index=index)
+                boxes = torch.gather(
+                    boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1])
+                )
+
+        results = []
+        for lab, box, sco in zip(labels, boxes, scores):
+            result = dict(labels=lab, boxes=box, scores=sco)
+            results.append(result)
+        return results
 
     def _compute_nearest_size(self, shape, target_size, stride=32) -> Tuple[int, int]:
         """
@@ -90,7 +171,7 @@ class Torch_model:
 
     def _preprocess(self, img: NDArray, stride: int = 32) -> torch.tensor:
         if not self.keep_ratio:
-            img = cv2.resize(img, (self.input_size[1], self.input_size[0]), cv2.INTER_AREA)
+            img = cv2.resize(img, (self.input_size[1], self.input_size[0]), cv2.INTER_LINEAR)
         elif self.rect:
             target_height, target_width = self._compute_nearest_size(
                 img.shape[:2], max(self.input_size[0], self.input_size[1])
@@ -114,25 +195,17 @@ class Torch_model:
             cv2.imwrite("torch_infer.jpg", debug_img)
         return torch.tensor(img).to(self.device)
 
-    def _postprocess(self, preds: torch.tensor, target_shape, origin_h: int, origin_w: int):
-        results = {}
-        output = self.postprocess(
-            preds, torch.tensor([[target_shape[1], target_shape[0]]], device=self.device)
-        )
+    def _postprocess(
+        self, preds: torch.tensor, processed_h: int, processed_w: int, origin_h: int, origin_w: int
+    ):
+        output = self.preds_postprocess(preds, (processed_h, processed_w), (origin_h, origin_w))
         output = filter_preds(output, self.conf_thresh)
 
-        # only 1 batch
-        boxes, scores, class_ids = (output[0]["boxes"], output[0]["scores"], output[0]["labels"])
-
-        if self.keep_ratio:
-            results["boxes"] = (
-                scale_boxes_ratio_kept(target_shape, boxes, (origin_h, origin_w)).cpu().numpy()
-            )
-        else:
-            results["boxes"] = scale_boxes(boxes, (origin_h, origin_w), target_shape).cpu().numpy()
-        results["scores"] = scores.cpu().numpy()
-        results["class_ids"] = class_ids.cpu().numpy()
-        return results
+        for res in output:
+            res["labels"] = res["labels"].cpu().numpy()
+            res["boxes"] = res["boxes"].cpu().numpy()
+            res["scores"] = res["scores"].cpu().numpy()
+        return output
 
     def _predict(self, img) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
         """
@@ -147,10 +220,15 @@ class Torch_model:
     def __call__(self, image: NDArray[np.uint8]):
         """
         Input image as ndarray, BGR, HWC
+        Output:
+            List of batch size length. Each element is a dict {"labels", "boxes", "scores"}
+            labels: np.ndarray of shape (N,), dtype np.int64
+            boxes: np.ndarray of shape (N, 4), dtype np.float32
+            scores: np.ndarray of shape (N,), dtype np.float32
         """
         processed_image = self._preprocess(image)
         pred = self._predict(processed_image)
-        return self._postprocess(pred, processed_image.shape[2:4], image.shape[0], image.shape[1])
+        return self._postprocess(pred, *processed_image.shape[2:4], image.shape[0], image.shape[1])
 
 
 def letterbox(
@@ -267,7 +345,7 @@ def clip_boxes(boxes, shape):
         boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
 
 
-def scale_boxes_ratio_kept(img1_shape, boxes, img0_shape, ratio_pad=None, padding=True):
+def scale_boxes_ratio_kept(boxes, img0_shape, img1_shape, ratio_pad=None, padding=True):
     # Rescale boxes (xyxy) from img1_shape to img0_shape
     if ratio_pad is None:  # calculate from img0_shape
         gain = min(
@@ -297,3 +375,31 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     boxes[:, 1] *= scale_y
     boxes[:, 3] *= scale_y
     return boxes
+
+
+def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int) -> np.ndarray:
+    # Convert normalized centers to absolute pixel coordinates
+    x_center = boxes[:, 0] * width
+    y_center = boxes[:, 1] * height
+    box_width = boxes[:, 2] * width
+    box_height = boxes[:, 3] * height
+
+    # Compute the top-left and bottom-right coordinates
+    x_min = x_center - (box_width / 2)
+    y_min = y_center - (box_height / 2)
+    x_max = x_center + (box_width / 2)
+    y_max = y_center + (box_height / 2)
+
+    # Convert coordinates to integers
+    if isinstance(boxes, np.ndarray):
+        x_min = np.maximum(np.floor(x_min), 1)
+        y_min = np.maximum(np.floor(y_min), 1)
+        x_max = np.minimum(np.ceil(x_max), width - 1)
+        y_max = np.minimum(np.ceil(y_max), height - 1)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    elif isinstance(boxes, torch.Tensor):
+        x_min = torch.clamp(torch.floor(x_min), min=1)
+        y_min = torch.clamp(torch.floor(y_min), min=1)
+        x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
+        y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
+        return torch.stack([x_min, y_min, x_max, y_max], dim=1)

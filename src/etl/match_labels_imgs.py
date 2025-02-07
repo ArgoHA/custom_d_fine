@@ -1,7 +1,7 @@
 from pathlib import Path
 from shutil import copyfile
 
-data_path = "/Users/argosaakyan/Data/Veryfi/HW/hw_labels_raw/n"
+data_path = "/home/argo/Desktop/Projects/Veryfi/detector/data/dataset_trans"
 data_path = Path(data_path)
 images_dir = data_path / "images"
 labels_dir = data_path / "labels"

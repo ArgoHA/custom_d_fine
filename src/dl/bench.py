@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.dl.dataset import CustomDataset, Loader
-from src.dl.utils import norm_xywh_to_abs_xyxy
+from src.dl.utils import norm_xywh_to_abs_xyxy, process_boxes, vis_one_box
 from src.dl.validator import Validator
 from src.infer.torch_model import Torch_model
 from src.infer.trt_model import TRT_model
@@ -48,24 +48,14 @@ class BenchLoader(Loader):
         return val_loader, test_loader
 
 
-def visualize(img, gt_boxes, pred_boxes, output_path, img_path):
-    for gt_box in gt_boxes:
-        cv2.rectangle(
-            img,
-            (int(gt_box[0]), int(gt_box[1])),
-            (int(gt_box[2]), int(gt_box[3])),
-            (0, 255, 0),
-            2,
-        )
+def visualize(
+    img, gt_boxes, pred_boxes, gt_labels, pred_labels, pred_scores, output_path, img_path
+):
+    for gt_box, gt_label in zip(gt_boxes, gt_labels):
+        vis_one_box(img, gt_box, gt_label, mode="gt")
 
-    for pred_box in pred_boxes:
-        cv2.rectangle(
-            img,
-            (int(pred_box[0]), int(pred_box[1])),
-            (int(pred_box[2]), int(pred_box[3])),
-            (255, 0, 0),
-            2,
-        )
+    for pred_box, pred_label, score in zip(pred_boxes, pred_labels, pred_scores):
+        vis_one_box(img, pred_box, pred_label, mode="pred", score=score)
 
     cv2.imwrite((str(f"{output_path / Path(img_path).stem}.jpg")), img)
 
@@ -79,24 +69,28 @@ def test_model(
     conf_thresh: float,
     iou_thresh: float,
     to_visualize: bool,
+    processed_size: Tuple[int, int],
+    keep_ratio: bool,
+    device: str,
 ):
     logger.info(f"Testing {name} model")
     gt = []
     preds = []
     latency = []
+    batch = 0
 
     output_path = root_path / Path(f"output/bench_imgs/{name}")
     output_path.mkdir(exist_ok=True, parents=True)
 
     for _, targets, img_paths in tqdm(test_loader, total=len(test_loader)):
         for img_path, targets in zip(img_paths, targets):
-            gt_boxes = torch.tensor(
-                norm_xywh_to_abs_xyxy(
-                    targets["boxes"],
-                    targets["orig_size"][1],
-                    targets["orig_size"][0],
-                )
-            )
+            gt_boxes = process_boxes(
+                targets["boxes"][None],
+                processed_size,
+                targets["orig_size"][None],
+                keep_ratio,
+                device,
+            )[batch].cpu()
             gt_labels = targets["labels"]
 
             t0 = time.perf_counter()
@@ -107,14 +101,23 @@ def test_model(
             gt.append({"boxes": gt_boxes, "labels": gt_labels.int()})
             preds.append(
                 {
-                    "boxes": torch.tensor(model_preds["boxes"]),
-                    "labels": torch.tensor(model_preds["class_ids"]).int(),
-                    "scores": torch.tensor(model_preds["scores"]),
+                    "boxes": torch.tensor(model_preds[batch]["boxes"]),
+                    "labels": torch.tensor(model_preds[batch]["labels"]),
+                    "scores": torch.tensor(model_preds[batch]["scores"]),
                 }
             )
 
             if to_visualize:
-                visualize(img, gt_boxes, model_preds["boxes"], output_path, img_path)
+                visualize(
+                    img=img,
+                    gt_boxes=gt_boxes,
+                    pred_boxes=model_preds[batch]["boxes"],
+                    gt_labels=gt_labels,
+                    pred_labels=model_preds[batch]["labels"],
+                    pred_scores=model_preds[batch]["scores"],
+                    output_path=output_path,
+                    img_path=img_path,
+                )
 
     validator = Validator(
         gt,
@@ -146,17 +149,17 @@ def main(cfg: DictConfig):
         # device="cpu",
     )
 
-    trt_model = TRT_model(
-        model_path=Path(cfg.train.path_to_save) / "model.engine",
-        n_outputs=len(cfg.train.label_to_name),
-        input_width=cfg.train.img_size[1],
-        input_height=cfg.train.img_size[0],
-        conf_thresh=conf_thresh,
-        iou_thresh=iou_thresh,
-        rect=False,
-        half=cfg.export.half,
-        keep_ratio=cfg.train.keep_ratio,
-    )
+    # trt_model = TRT_model(
+    #     model_path=Path(cfg.train.path_to_save) / "model.engine",
+    #     n_outputs=len(cfg.train.label_to_name),
+    #     input_width=cfg.train.img_size[1],
+    #     input_height=cfg.train.img_size[0],
+    #     conf_thresh=conf_thresh,
+    #     iou_thresh=iou_thresh,
+    #     rect=False,
+    #     half=cfg.export.half,
+    #     keep_ratio=cfg.train.keep_ratio,
+    # )
 
     data_path = Path(cfg.train.data_path)
     val_loader, test_loader = BenchLoader(
@@ -171,7 +174,7 @@ def main(cfg: DictConfig):
     all_metrics = {}
     models = {
         "torch": torch_model,
-        "trt_model": trt_model,
+        # "trt_model": trt_model,
     }
     for model_name, model in models.items():
         all_metrics[model_name] = test_model(
@@ -183,6 +186,9 @@ def main(cfg: DictConfig):
             conf_thresh,
             iou_thresh,
             to_visualize=True,
+            processed_size=tuple(cfg.train.img_size),
+            keep_ratio=cfg.train.keep_ratio,
+            device=cfg.train.device,
         )
 
     metrics_df = pd.DataFrame.from_dict(all_metrics, orient="index")
