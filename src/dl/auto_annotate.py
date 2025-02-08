@@ -62,10 +62,10 @@ def main(cfg: DictConfig):
         iou_thresh=cfg.train.iou_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
-        # device="cpu",
     )
 
-    folder_path = Path(cfg.train.data_path).parent / "dt_test"
+    # folder_path = Path(cfg.train.data_path).parent / "dt_test"
+    folder_path = Path(cfg.train.path_to_test_data)
     output_path = Path(cfg.train.root) / "output" / "auto_annotate"
 
     run(torch_model, folder_path, output_path)

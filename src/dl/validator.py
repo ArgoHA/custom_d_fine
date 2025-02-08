@@ -27,8 +27,8 @@ class Validator:
         self.conf_matrix = None
 
     def compute_metrics(self, extended=False) -> Dict[str, float]:
-        filtered_preds = filter_preds(copy.deepcopy(self.preds), self.conf_thresh)
         self.torch_metrics = self.torch_metric.compute()
+        filtered_preds = filter_preds(copy.deepcopy(self.preds), self.conf_thresh)
 
         metrics = self._compute_main_metrics(filtered_preds)
         metrics["mAP_50"] = self.torch_metrics["map_50"].item()

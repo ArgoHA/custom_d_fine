@@ -9,14 +9,16 @@ import pandas as pd
 import torch
 from loguru import logger
 from omegaconf import DictConfig
+from tabulate import tabulate
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.dl.dataset import CustomDataset, Loader
-from src.dl.utils import norm_xywh_to_abs_xyxy, process_boxes, vis_one_box
+from src.dl.utils import process_boxes, vis_one_box
 from src.dl.validator import Validator
 from src.infer.torch_model import Torch_model
 from src.infer.trt_model import TRT_model
+from src.infer.ultra_model import UltraModel
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -132,7 +134,7 @@ def test_model(
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
 def main(cfg: DictConfig):
-    conf_thresh = 0.5
+    conf_thresh = 0.25
     iou_thresh = 0.5
 
     torch_model = Torch_model(
@@ -141,7 +143,7 @@ def main(cfg: DictConfig):
         n_outputs=len(cfg.train.label_to_name),
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
-        conf_thresh=conf_thresh,
+        conf_thresh=conf_thresh + 0.3,
         iou_thresh=iou_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
@@ -149,17 +151,27 @@ def main(cfg: DictConfig):
         # device="cpu",
     )
 
-    # trt_model = TRT_model(
-    #     model_path=Path(cfg.train.path_to_save) / "model.engine",
-    #     n_outputs=len(cfg.train.label_to_name),
-    #     input_width=cfg.train.img_size[1],
-    #     input_height=cfg.train.img_size[0],
-    #     conf_thresh=conf_thresh,
-    #     iou_thresh=iou_thresh,
-    #     rect=False,
-    #     half=cfg.export.half,
-    #     keep_ratio=cfg.train.keep_ratio,
-    # )
+    trt_model = TRT_model(
+        model_path=Path(cfg.train.path_to_save) / "model.engine",
+        n_outputs=len(cfg.train.label_to_name),
+        input_width=cfg.train.img_size[1],
+        input_height=cfg.train.img_size[0],
+        conf_thresh=conf_thresh + 0.3,
+        iou_thresh=iou_thresh,
+        rect=False,
+        half=cfg.export.half,
+        keep_ratio=cfg.train.keep_ratio,
+    )
+
+    ultra_model = UltraModel(
+        model_path=Path(
+            "/home/argo/Desktop/Projects/Veryfi/vis_drone/runs/detect/train11/weights/best.engine"
+        ),
+        conf_thresh=conf_thresh,
+        iou_thresh=iou_thresh,
+        img_size=cfg.train.img_size[0],
+        # device="cpu",
+    )
 
     data_path = Path(cfg.train.data_path)
     val_loader, test_loader = BenchLoader(
@@ -173,8 +185,9 @@ def main(cfg: DictConfig):
 
     all_metrics = {}
     models = {
-        "torch": torch_model,
-        # "trt_model": trt_model,
+        "Ultralytics": ultra_model,
+        "Torch": torch_model,
+        "TensorRT": trt_model,
     }
     for model_name, model in models.items():
         all_metrics[model_name] = test_model(
@@ -191,8 +204,9 @@ def main(cfg: DictConfig):
             device=cfg.train.device,
         )
 
-    metrics_df = pd.DataFrame.from_dict(all_metrics, orient="index")
-    print(metrics_df)
+    metrcs = pd.DataFrame.from_dict(all_metrics, orient="index")
+    tabulated_data = tabulate(metrcs.round(4), headers="keys", tablefmt="pretty", showindex=True)
+    print("\n" + tabulated_data)
 
 
 if __name__ == "__main__":

@@ -163,7 +163,9 @@ class Trainer:
 
         results = []
         for lab, box, sco in zip(labels, boxes, scores):
-            result = dict(labels=lab, boxes=box, scores=sco)
+            result = dict(
+                labels=lab.detach().cpu(), boxes=box.detach().cpu(), scores=sco.detach().cpu()
+            )
             results.append(result)
         return results
 
@@ -178,7 +180,7 @@ class Trainer:
                 self.keep_ratio,
                 inputs.device,
             )
-            result = dict(labels=lab, boxes=box.squeeze(0))
+            result = dict(labels=lab.detach().cpu(), boxes=box.squeeze(0).detach().cpu())
             results.append(result)
         return results
 

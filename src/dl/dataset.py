@@ -34,6 +34,7 @@ class CustomDataset(Dataset):
         mode: str,
         cfg: DictConfig,
     ) -> None:
+        self.project_path = Path(cfg.train.root)
         self.root_path = root_path
         self.split = split
         self.target_h, self.target_w = img_size
@@ -64,7 +65,7 @@ class CustomDataset(Dataset):
                     border_mode=cv2.BORDER_CONSTANT,
                     fill=(114, 114, 114),
                 ),
-                A.CenterCrop(self.target_h, self.target_w),
+                # A.CenterCrop(self.target_h, self.target_w),
             ]
         else:
             resize = [A.Resize(self.target_h, self.target_w)]
@@ -130,7 +131,7 @@ class CustomDataset(Dataset):
             vis_one_box(image_np, box, class_id, mode="gt")
 
         # Save the image
-        save_dir = self.root_path.parent.parent / "output" / "debug_images" / self.mode
+        save_dir = self.project_path / "output" / "debug_images" / self.mode
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / f"{idx}_idx_{img_path.stem}_debug.jpg"
         cv2.imwrite(str(save_path), cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR))
