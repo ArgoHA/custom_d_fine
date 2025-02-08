@@ -3,10 +3,12 @@ import json
 import os
 from pathlib import Path
 
+import hydra
+import pandas as pd
 from PIL import Image
 
 
-def yolo_to_coco(labels_dir, images_dir, output_file, categories_list=None):
+def yolo_to_coco(labels_dir, images_dir, output_file, split, categories_list=None):
     # Initialize COCO structure
     data_coco = {"images": [], "type": "instances", "annotations": [], "categories": []}
 
@@ -16,7 +18,17 @@ def yolo_to_coco(labels_dir, images_dir, output_file, categories_list=None):
     category_set = set()
 
     # Get list of label files
-    label_files = [f for f in os.listdir(labels_dir) if f.endswith(".txt")]
+    # label_files = [f for f in os.listdir(labels_dir) if f.endswith(".txt")]
+
+    label_files = []
+    for label_file in Path(labels_dir).iterdir():
+        print(str(label_file.stem))
+        if str(label_file.name).endswith(".txt") and str(label_file.name) in split[0].tolist():
+            label_files.append(label_file.name)
+
+    print(split[0].tolist())
+
+    print(label_files)
 
     for label_file in label_files:
         image_filename = os.path.splitext(label_file)[0]
@@ -98,12 +110,20 @@ def yolo_to_coco(labels_dir, images_dir, output_file, categories_list=None):
         json.dump(data_coco, f_out, indent=4)
 
 
-if __name__ == "__main__":
-    dataset_path = Path("/home/argo/Desktop/Projects/Veryfi/detector/data/dataset_trans")
-    for folder in ["train", "val"]:
-        labels_path = dataset_path / folder / "labels"
-        imgs_path = dataset_path / folder / "images"
-        output = dataset_path / f"{folder}_annotations.json"
-        categories = ["hw", "tamper"]
+@hydra.main(version_base=None, config_path="../../", config_name="config")
+def main(cfg):
+    categories = cfg.train.label_to_name.values()
+    dataset_path = Path(cfg.train.data_path)
+    labels_path = dataset_path / "labels"
+    imgs_path = dataset_path / "images"
 
-        yolo_to_coco(labels_path, imgs_path, output, categories)
+    for csv in ["train", "val"]:
+        split = pd.read_csv(dataset_path / f"{csv}.csv", header=None)
+        split[0] = split[0].str.replace(".jpg", ".txt")
+        output = dataset_path / f"{csv}_annotations.json"
+
+        yolo_to_coco(labels_path, imgs_path, output, split, categories)
+
+
+if __name__ == "__main__":
+    main()
