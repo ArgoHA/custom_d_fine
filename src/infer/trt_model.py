@@ -1,12 +1,12 @@
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
 import tensorrt as trt
 import torch
+import torch.nn.functional as F
 from numpy.typing import NDArray
 
-from src.d_fine.postprocess import DFINEPostProcessor
 from src.dl.utils import filter_preds
 
 
@@ -33,8 +33,6 @@ class TRT_model:
         self.half = half
         self.keep_ratio = keep_ratio
         self.debug_mode = False
-        self.conf_thresh = conf_thresh
-        self.d_fine_postprocessor = DFINEPostProcessor(num_classes=n_outputs)
 
         if not device:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -88,6 +86,101 @@ class TRT_model:
             cv2.imwrite("trt_infer.jpg", debug_img)
         return torch.from_numpy(img).to(self.device)
 
+    def _test_pred(self) -> None:
+        random_image = np.random.randint(
+            0, 255, size=(self.input_size[1], self.input_size[0], 3), dtype=np.uint8
+        )
+        processed_image = self._preprocess(random_image)
+        preds = self._predict(processed_image)
+        self._postprocess(
+            preds,
+            *processed_image.shape[2:4],
+            random_image.shape[0],
+            random_image.shape[1],
+        )
+
+    @staticmethod
+    def process_boxes(boxes, processed_size, orig_size, keep_ratio, device):
+        bs = 1
+        processed_sizes = (
+            np.array((processed_size[0], processed_size[1]))[None].repeat(bs, 1)  # bs 1
+        )
+        orig_sizes = (
+            np.array((orig_size[0], orig_size[1]))[None].repeat(bs, 1)  # bs 1
+        )
+
+        boxes = boxes.cpu().numpy()
+        final_boxes = np.zeros_like(boxes)
+        for idx, box in enumerate(boxes):
+            final_boxes[idx] = norm_xywh_to_abs_xyxy(
+                box, processed_sizes[idx][0], processed_sizes[idx][1]
+            )
+
+        for i in range(bs):
+            if keep_ratio:
+                final_boxes[i] = scale_boxes_ratio_kept(
+                    final_boxes[i],
+                    orig_sizes[i],
+                    processed_sizes[i],
+                )
+            else:
+                final_boxes[i] = scale_boxes(
+                    final_boxes[i],
+                    orig_sizes[i],
+                    processed_sizes[i],
+                )
+        return torch.tensor(final_boxes).to(device)
+
+    def preds_postprocess(
+        self,
+        outputs,
+        processed_size,
+        orig_size,
+        num_top_queries=300,
+        use_focal_loss=True,
+    ) -> List[Dict[str, torch.Tensor]]:
+        """
+        returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
+        """
+        logits, boxes = outputs[0], outputs[1]
+        boxes = self.process_boxes(
+            boxes, processed_size, orig_size, self.keep_ratio, self.device
+        )  # B x TopQ x 4
+
+        if use_focal_loss:
+            scores = F.sigmoid(logits)
+            scores, index = torch.topk(scores.flatten(1), num_top_queries, dim=-1)
+            labels = index - index // self.n_outputs * self.n_outputs
+            index = index // self.n_outputs
+            boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+        else:
+            scores = F.softmax(logits)[:, :, :-1]
+            scores, labels = scores.max(dim=-1)
+            if scores.shape[1] > num_top_queries:
+                scores, index = torch.topk(scores, num_top_queries, dim=-1)
+                labels = torch.gather(labels, dim=1, index=index)
+                boxes = torch.gather(
+                    boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1])
+                )
+
+        results = []
+        for lab, box, sco in zip(labels, boxes, scores):
+            result = dict(labels=lab, boxes=box, scores=sco)
+            results.append(result)
+        return results
+
+    def _postprocess(
+        self, preds: torch.tensor, processed_h: int, processed_w: int, origin_h: int, origin_w: int
+    ):
+        output = self.preds_postprocess(preds, (processed_h, processed_w), (origin_h, origin_w))
+        output = filter_preds(output, self.conf_thresh)
+
+        for res in output:
+            res["labels"] = res["labels"].cpu().numpy()
+            res["boxes"] = res["boxes"].cpu().numpy()
+            res["scores"] = res["scores"].cpu().numpy()
+        return output
+
     def _predict(self, img: torch.Tensor) -> List[torch.Tensor]:
         # Ensure the input tensor is contiguous
         img_tensor = img.contiguous()
@@ -121,49 +214,10 @@ class TRT_model:
         # Outputs are already on the device as PyTorch tensors
         return output_tensors
 
-    def _test_pred(self) -> None:
-        random_image = np.random.randint(
-            0, 255, size=(self.input_size[1], self.input_size[0], 3), dtype=np.uint8
-        )
-        processed_image = self._preprocess(random_image)
-        preds = self._predict(processed_image)
-        self._postprocess(
-            preds,
-            processed_image.shape[2:4],
-            random_image.shape[0],
-            random_image.shape[1],
-        )
-
-    def _postprocess(
-        self, preds: List[np.ndarray], target_shape: Tuple[int, int], origin_h: int, origin_w: int
-    ):
-        output = self.d_fine_postprocessor(
-            {"pred_logits": preds[0], "pred_boxes": preds[1]},
-            torch.tensor([[target_shape[1], target_shape[0]]], device=self.device),
-        )
-        output = filter_preds(output, self.conf_thresh)
-
-        res = {"boxes": [], "scores": [], "class_ids": []}
-
-        # only 1 batch
-        if self.keep_ratio:
-            res["boxes"] = (
-                scale_boxes_ratio_kept(target_shape, output[0]["boxes"], (origin_h, origin_w))
-                .cpu()
-                .numpy()
-            )
-        else:
-            res["boxes"] = (
-                scale_boxes(output[0]["boxes"], (origin_h, origin_w), target_shape).cpu().numpy()
-            )
-        res["scores"] = output[0]["scores"].cpu().numpy()
-        res["class_ids"] = output[0]["labels"].cpu().numpy()
-        return res
-
     def __call__(self, image: NDArray[np.uint8]):
         processed_image = self._preprocess(image)
         pred = self._predict(processed_image)
-        res = self._postprocess(pred, processed_image.shape[2:4], image.shape[0], image.shape[1])
+        res = self._postprocess(pred, *processed_image.shape[2:4], image.shape[0], image.shape[1])
         return res
 
 
@@ -252,3 +306,31 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     boxes[:, 1] *= scale_y
     boxes[:, 3] *= scale_y
     return boxes
+
+
+def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int) -> np.ndarray:
+    # Convert normalized centers to absolute pixel coordinates
+    x_center = boxes[:, 0] * width
+    y_center = boxes[:, 1] * height
+    box_width = boxes[:, 2] * width
+    box_height = boxes[:, 3] * height
+
+    # Compute the top-left and bottom-right coordinates
+    x_min = x_center - (box_width / 2)
+    y_min = y_center - (box_height / 2)
+    x_max = x_center + (box_width / 2)
+    y_max = y_center + (box_height / 2)
+
+    # Convert coordinates to integers
+    if isinstance(boxes, np.ndarray):
+        x_min = np.maximum(np.floor(x_min), 1)
+        y_min = np.maximum(np.floor(y_min), 1)
+        x_max = np.minimum(np.ceil(x_max), width - 1)
+        y_max = np.minimum(np.ceil(y_max), height - 1)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    elif isinstance(boxes, torch.Tensor):
+        x_min = torch.clamp(torch.floor(x_min), min=1)
+        y_min = torch.clamp(torch.floor(y_min), min=1)
+        x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
+        y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
+        return torch.stack([x_min, y_min, x_max, y_max], dim=1)

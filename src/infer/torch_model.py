@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from numpy.typing import NDArray
 
 from src.d_fine.dfine import build_model
-from src.d_fine.postprocess import DFINEPostProcessor
 from src.dl.utils import filter_preds
 
 
@@ -40,8 +39,6 @@ class Torch_model:
         self.keep_ratio = keep_ratio
         self.debug_mode = False
 
-        self.conf_thresh = conf_thresh
-
         if not device:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -51,8 +48,6 @@ class Torch_model:
             self.np_dtype = np.float16
         else:
             self.np_dtype = np.float32
-
-        self.postprocess = DFINEPostProcessor(num_classes=self.n_outputs, use_focal_loss=True)
 
         self._load_model()
         self._test_pred()
@@ -208,12 +203,6 @@ class Torch_model:
         return output
 
     def _predict(self, img) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-        """
-        Returns predictions as a Tuple of torch.tensors
-        - boxes (torch.tensor): Tensor of shape (N, 4) containing bounding boxes in [x1, y1, x2, y2] format.
-        - scores (torch.tensor): Tensor of shape (N,) containing confidence scores for each box.
-        - classes (torch.tensor): Tensor of shape (N,) containing class ids for each box.
-        """
         return self.model(img)
 
     @torch.no_grad()
