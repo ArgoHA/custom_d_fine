@@ -14,6 +14,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
 
 from src.dl.utils import (
+    CustomPadIfNeeded,
     abs_xyxy_to_norm_xywh,
     get_mosaic_coordinate,
     norm_xywh_to_abs_xyxy,
@@ -164,8 +165,8 @@ class CustomDataset(Dataset):
 
     def _load_mosaic(self, idx):
         mosaic_targets = []
-        yc = int(random.uniform(self.target_h * 0.5, self.target_h * 1.5))
-        xc = int(random.uniform(self.target_w * 0.5, self.target_w * 1.5))
+        yc = int(random.uniform(self.target_h * 0.6, self.target_h * 1.4))
+        xc = int(random.uniform(self.target_w * 0.6, self.target_w * 1.4))
         indices = [idx] + [random.randint(0, self.__len__() - 1) for _ in range(3)]
 
         for i_mosaic, m_idx in enumerate(indices):

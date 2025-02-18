@@ -99,7 +99,7 @@ class Trainer:
             cfg.model_name,
             num_labels,
             cfg.train.device,
-            pretrained_model_path=Path(cfg.train.pretrained_model_path),
+            pretrained_model_path=cfg.train.pretrained_model_path,
         )
 
         self.ema_model = None

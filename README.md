@@ -70,9 +70,7 @@ Use inference classes in `src/infer`. Currently available:
 ## TODO
 - Implement multiscale aug
 - Batch inference
-- Add other model sizes
-- Add OpenVino inference class, refactor postprocessing of existing ones
-- Fix visualizations when ratio is kept
+- Add OpenVino inference class
 - Finetune with layers freeze
 - Add support for cashing in dataset
 - Add support for multi GPU training

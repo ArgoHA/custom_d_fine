@@ -1,3 +1,4 @@
+from pathlib import Path
 import torch.nn as nn
 import torch.optim as optim
 
@@ -54,7 +55,7 @@ def build_model(model_name, num_classes, device, pretrained_model_path=None):
     model = DFINE(backbone, encoder, decoder)
 
     if pretrained_model_path:
-        if not pretrained_model_path.exists():
+        if not Path(pretrained_model_path).exists():
             raise FileNotFoundError(f"{pretrained_model_path} does not exist")
         model = load_tuning_state(model, str(pretrained_model_path))
     return model.to(device)

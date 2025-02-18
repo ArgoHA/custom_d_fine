@@ -1,40 +1,51 @@
-project_name: digital_tampering # for wandb
-exp_name: keep_ratio
+project_name: vis_drone # for wandb
+exp_name: test_x
 
 exp: ${exp_name}_${now_dir}
 
-model_name: m # model size (n, s, m, l, x)
+model_name: x # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/Veryfi/dt # project root with dataset and outputs
-  pretrained_model_path: pretrained/dfine_m_coco.pth # dfine_m_obj2coco.pth
+  root: /home/argo/Desktop/Projects/Veryfi/vis_drone/ # project root with dataset and outputs
+  pretrained_dataset: coco # coco, obj2coco
+  pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
-  data_path: ${train.root}/data/dataset # path to dataset
-  path_to_test_data: ${train.root}/data/dt_test
+  data_path: ${train.root}/custom_dataset # path to dataset
+  path_to_test_data: ${train.root}/VisDrone2019-DET-test-dev/images
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
   ### Configs ###
   device: cuda
-  label_to_name: {0: dt}
+  label_to_name:
+    0: pedestrian
+    1: people
+    2: bicycle
+    3: car
+    4: van
+    5: truck
+    6: tricycle
+    7: awning-tricycle
+    8: bus
+    9: motor
   use_one_class: False
 
-  img_size: [960, 960] # (h, w)
-  keep_ratio: True # image aspect ratio, if True - image will be padded
+  img_size: [640, 640] # (h, w)
+  keep_ratio: False # image aspect ratio, if True - image will be padded
   to_visualize_eval: True # save images with gt and preds
   debug_img_processing: True # save images after preprocessing
 
   amp_enabled: True # use automatic mixed precision
   clip_max_norm: 0.1 # gradient clipping
 
-  batch_size: 8 # physical, should fit on the device
+  batch_size: 4 # physical, should fit on the device
   b_accum_steps: 4 # use batch accumulation x * batch size. >= 1
-  epochs: 45
-  ignore_background_epochs: 0 # background images are not used for first N epochs
-  num_workers: 4
+  epochs: 55
+  ignore_background_epochs: 0 # background images are not used for N epochs
+  num_workers: 12
 
   ### Validation ###
-  conf_thresh: 0.5 # ignored for mAP
+  conf_thresh: 0.5
   iou_thresh: 0.5
 
   ### EMA ###
@@ -50,22 +61,22 @@ train:
 
   ### Augs ###
   mosaic_augs:
-    mosaic_prob: 0.9
+    mosaic_prob: 0.8
     no_mosaic_epochs: 5
-    mosaic_scale: [0.6, 1.4]
+    mosaic_scale: [0.7, 1.5]
     degrees: 5.0
     translate: 0.2
     shear: 2.0
 
   augs:
-    rotate_90: 0.3
-    left_right_flip: 0.15
-    up_down_flip: 0.05
+    rotate_90: 0.1
+    left_right_flip: 0.3
+    up_down_flip: 0.0
     to_gray: 0.01
     blur: 0.01
     gamma: 0.02
     brightness: 0.02
-    noise: 0.02
+    noise: 0.01
 
   ### Reproducibility ###
   seed: 42
@@ -81,7 +92,7 @@ split:
 export: # TensorRT must be done on the inference device
   half: False # fp16, not needed for Openvino
   max_batch_size: 1 # TODO
-  dynamic_input: True # not for TensorRT, limited for OpenVino
+  dynamic_input: False # not for TensorRT, limited for OpenVino
 
 
 
