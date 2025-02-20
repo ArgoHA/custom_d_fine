@@ -129,6 +129,10 @@ def test_model(
         iou_thresh=iou_thresh,
     )
     metrics = validator.compute_metrics(extended=False)
+
+    # as inference done with a conf threshold, mAPs don't make much sense
+    metrics.pop("mAP_50")
+    metrics.pop("mAP_50_95")
     metrics["latency"] = round(np.mean(latency[1:]), 1)
     return metrics
 
