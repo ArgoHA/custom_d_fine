@@ -7,6 +7,7 @@ from pathlib import Path
 from shutil import rmtree
 from typing import Dict
 
+import albumentations as A
 import cv2
 import numpy as np
 import pandas as pd
@@ -389,33 +390,6 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     return boxes
 
 
-# def process_boxes(inputs, boxes, orig_target_sizes, keep_ratio):
-#     current_input_sizes = (
-#         torch.tensor((inputs.shape[-2], inputs.shape[-1]), device=inputs.device)
-#         .unsqueeze(0)
-#         .repeat(inputs.shape[0], 1)
-#     )
-#     boxes = boxes.cpu().numpy()
-#     final_boxes = np.zeros_like(boxes)
-#     for idx, box in enumerate(boxes):
-#         final_boxes[idx] = norm_xywh_to_abs_xyxy(box, *current_input_sizes[idx].cpu().numpy())
-
-#     for i in range(orig_target_sizes.shape[0]):
-#         if keep_ratio:
-#             final_boxes[i] = scale_boxes_ratio_kept(
-#                 final_boxes[i],
-#                 orig_target_sizes[i].cpu().numpy(),
-#                 current_input_sizes[i].cpu().numpy(),
-#             )
-#         else:
-#             final_boxes[i] = scale_boxes(
-#                 final_boxes[i],
-#                 orig_target_sizes[i].cpu().numpy(),
-#                 current_input_sizes[i].cpu().numpy(),
-#             )
-#     return torch.tensor(final_boxes).to(inputs.device)
-
-
 def process_boxes(boxes, processed_size, orig_sizes, keep_ratio, device):
     """
     Inputs:
@@ -456,3 +430,78 @@ def process_boxes(boxes, processed_size, orig_sizes, keep_ratio, device):
                 processed_sizes[i],
             )
     return torch.tensor(final_boxes).to(device)
+
+
+class CustomPadIfNeeded(A.DualTransform):
+    """
+    Custom padding transform that, with probability `rect_resize_prob`, pads the image
+    to the nearest dimensions divisible by `div` and otherwise pads to fixed square dimensions.
+    Also adjusts bounding boxes accordingly.
+    """
+
+    def __init__(
+        self,
+        square_height: int,
+        square_width: int,
+        rect_resize_prob: float = 0.0,
+        div: int = 32,
+        border_mode=cv2.BORDER_CONSTANT,
+        value=(114, 114, 114),
+        always_apply=False,
+        p=1.0,
+    ):
+        super().__init__(always_apply, p)
+        self.square_height = square_height
+        self.square_width = square_width
+        self.rect_resize_prob = rect_resize_prob
+        self.div = div
+        self.border_mode = border_mode
+        self.value = value
+
+    def get_params_dependent_on_targets(self, params):
+        # We need the image size to compute padding
+        image = params["image"]
+        h, w = image.shape[:2]
+        # Decide which padding mode to use
+        if random.random() < self.rect_resize_prob:
+            new_h = math.ceil(h / self.div) * self.div
+            new_w = math.ceil(w / self.div) * self.div
+        else:
+            new_h, new_w = self.square_height, self.square_width
+
+        pad_h = max(new_h - h, 0)
+        pad_w = max(new_w - w, 0)
+
+        # For center padding
+        top = pad_h // 2
+        left = pad_w // 2
+
+        return {"top": top, "left": left, "new_h": new_h, "new_w": new_w}
+
+    def apply(self, image, top=0, left=0, new_h=None, new_w=None, **params):
+        h, w = image.shape[:2]
+        bottom = new_h - h - top
+        right = new_w - w - left
+        image = cv2.copyMakeBorder(
+            image, top, bottom, left, right, self.border_mode, value=self.value
+        )
+        return image
+
+    def apply_to_bbox(self, bbox, top=0, left=0, **params):
+        # bbox: [x_min, y_min, x_max, y_max]
+        x_min, y_min, x_max, y_max = bbox
+        x_min += left
+        x_max += left
+        y_min += top
+        y_max += top
+        return [x_min, y_min, x_max, y_max]
+
+    def get_transform_init_args_names(self):
+        return (
+            "square_height",
+            "square_width",
+            "rect_resize_prob",
+            "div",
+            "border_mode",
+            "value",
+        )
