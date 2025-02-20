@@ -1,8 +1,7 @@
 project_name: vis_drone # for wandb
-exp_name: s
+exp_name: s_model
 
 exp: ${exp_name}_${now_dir}
-# exp: ema_98_55_2025-02-11
 
 model_name: s # model size (n, s, m, l, x)
 
