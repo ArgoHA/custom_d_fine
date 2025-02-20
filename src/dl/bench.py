@@ -138,7 +138,7 @@ def test_model(
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
 def main(cfg: DictConfig):
-    conf_thresh = 0.25
+    conf_thresh = 0.5
     iou_thresh = 0.5
 
     torch_model = Torch_model(
@@ -147,7 +147,7 @@ def main(cfg: DictConfig):
         n_outputs=len(cfg.train.label_to_name),
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
-        conf_thresh=conf_thresh + 0.25,
+        conf_thresh=conf_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
@@ -158,7 +158,7 @@ def main(cfg: DictConfig):
         n_outputs=len(cfg.train.label_to_name),
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
-        conf_thresh=conf_thresh + 0.25,
+        conf_thresh=conf_thresh,
         rect=False,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
@@ -170,7 +170,7 @@ def main(cfg: DictConfig):
         n_outputs=len(cfg.train.label_to_name),
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
-        conf_thresh=conf_thresh + 0.25,
+        conf_thresh=conf_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
