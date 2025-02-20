@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 import cv2
@@ -8,7 +7,6 @@ import torch.nn.functional as F
 from numpy.typing import NDArray
 
 from src.d_fine.dfine import build_model
-from src.dl.utils import filter_preds
 
 
 class Torch_model:
@@ -20,23 +18,20 @@ class Torch_model:
         input_width: int = 640,
         input_height: int = 640,
         conf_thresh: float = 0.5,
-        iou_thresh: float = 0.5,
         rect: bool = True,  # cuts paddings, inference is faster, accuracy might be lower
         half: bool = False,
         keep_ratio: bool = True,
         device: str = None,
     ):
-        self.mean_norm = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        self.std_norm = np.array([1.0, 1.0, 1.0], dtype=np.float32)
         self.input_size = (input_width, input_height)
         self.n_outputs = n_outputs
         self.model_name = model_name
         self.model_path = model_path
         self.conf_thresh = conf_thresh
-        self.iou_thresh = iou_thresh
         self.rect = rect
         self.half = half
         self.keep_ratio = keep_ratio
+        self.channels = 3
         self.debug_mode = False
 
         if not device:
@@ -57,42 +52,21 @@ class Torch_model:
         self.model.load_state_dict(
             torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu"))
         )
-
-        # self.model_path = (
-        #     "/home/argo/Desktop/Projects/D_FINE/output/dfine_hgnetv2_m_obj2custom/checkpoint0047.pth"
-        # )
-        # self.model.load_state_dict(
-        #     torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu"))["ema"][
-        #         "module"
-        #     ],
-        #     strict=False,
-        # )
-        # self.model.load_state_dict(
-        #     torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu"))[
-        #         "model"
-        #     ],
-        #     strict=False,
-        # )
-
         if self.half:
             self.model.half()
         self.model.eval()
         self.model.to(self.device)
 
-    def _test_pred(self):
-        random_image = np.random.randint(0, 255, size=(1000, 1110, 3), dtype=np.uint8)
-        self.model(self._preprocess(random_image))
+    def _test_pred(self) -> None:
+        random_image = np.random.randint(
+            0, 255, size=(self.input_size[1], self.input_size[0], self.channels), dtype=np.uint8
+        )
+        processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(random_image)
+        preds = self._predict(processed_inputs)
+        self._postprocess(preds, processed_sizes, original_sizes)
 
     @staticmethod
-    def process_boxes(boxes, processed_size, orig_size, keep_ratio, device):
-        bs = 1
-        processed_sizes = (
-            np.array((processed_size[0], processed_size[1]))[None].repeat(bs, 1)  # bs 1
-        )
-        orig_sizes = (
-            np.array((orig_size[0], orig_size[1]))[None].repeat(bs, 1)  # bs 1
-        )
-
+    def process_boxes(boxes, processed_sizes, orig_sizes, keep_ratio, device):
         boxes = boxes.cpu().numpy()
         final_boxes = np.zeros_like(boxes)
         for idx, box in enumerate(boxes):
@@ -100,7 +74,7 @@ class Torch_model:
                 box, processed_sizes[idx][0], processed_sizes[idx][1]
             )
 
-        for i in range(bs):
+        for i in range(len(orig_sizes)):
             if keep_ratio:
                 final_boxes[i] = scale_boxes_ratio_kept(
                     final_boxes[i],
@@ -115,11 +89,11 @@ class Torch_model:
                 )
         return torch.tensor(final_boxes).to(device)
 
-    def preds_postprocess(
+    def _preds_postprocess(
         self,
         outputs,
-        processed_size,
-        orig_size,
+        processed_sizes,
+        original_sizes,
         num_top_queries=300,
         use_focal_loss=True,
     ) -> List[Dict[str, torch.Tensor]]:
@@ -128,7 +102,7 @@ class Torch_model:
         """
         logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
         boxes = self.process_boxes(
-            boxes, processed_size, orig_size, self.keep_ratio, self.device
+            boxes, processed_sizes, original_sizes, self.keep_ratio, self.device
         )  # B x TopQ x 4
 
         if use_focal_loss:
@@ -165,14 +139,14 @@ class Torch_model:
         return new_shape
 
     def _preprocess(self, img: NDArray, stride: int = 32) -> torch.tensor:
-        if not self.keep_ratio:
+        if not self.keep_ratio:  # simple resize
             img = cv2.resize(img, (self.input_size[1], self.input_size[0]), cv2.INTER_LINEAR)
-        elif self.rect:
+        elif self.rect:  # keep ratio and cut paddings
             target_height, target_width = self._compute_nearest_size(
                 img.shape[:2], max(self.input_size[0], self.input_size[1])
             )
             img = letterbox(img, (target_height, target_width), stride=stride, auto=False)[0]
-        else:
+        else:  # keep ratio adding paddings
             img = letterbox(
                 img, (self.input_size[1], self.input_size[0]), stride=stride, auto=False
             )[0]
@@ -180,20 +154,49 @@ class Torch_model:
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, then HWC to CHW
         img = np.ascontiguousarray(img, dtype=self.np_dtype)
         img /= 255.0
-        img = img.reshape([1, *img.shape])  # Add batch dimension
 
         # save debug image
         if self.debug_mode:
-            debug_img = img[0].transpose(1, 2, 0)  # CHW to HWC
+            debug_img = img.reshape([1, *img.shape])
+            debug_img = debug_img[0].transpose(1, 2, 0)  # CHW to HWC
             debug_img = (debug_img * 255.0).astype(np.uint8)  # Convert to uint8
             debug_img = debug_img[:, :, ::-1]  # RGB to BGR for saving
             cv2.imwrite("torch_infer.jpg", debug_img)
-        return torch.tensor(img).to(self.device)
+        return img
+
+    def _prepare_inputs(self, inputs):
+        original_sizes = []
+        processed_sizes = []
+
+        if isinstance(inputs, np.ndarray) and inputs.ndim == 3:  # single image
+            processed_inputs = self._preprocess(inputs)[None]
+            original_sizes.append((inputs.shape[0], inputs.shape[1]))
+            processed_sizes.append((processed_inputs[0].shape[1], processed_inputs[0].shape[2]))
+
+        elif isinstance(inputs, np.ndarray) and inputs.ndim == 4:  # batch of images
+            processed_inputs = np.zeros(
+                (inputs.shape[0], self.channels, self.input_size[0], self.input_size[1]),
+                dtype=self.np_dtype,
+            )
+            for idx, image in enumerate(inputs):
+                processed_inputs[idx] = self._preprocess(image)
+                original_sizes.append((image.shape[0], image.shape[1]))
+                processed_sizes.append(
+                    (processed_inputs[idx].shape[1], processed_inputs[idx].shape[2])
+                )
+        return torch.tensor(processed_inputs).to(self.device), processed_sizes, original_sizes
+
+    @torch.no_grad()
+    def _predict(self, inputs) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
+        return self.model(inputs)
 
     def _postprocess(
-        self, preds: torch.tensor, processed_h: int, processed_w: int, origin_h: int, origin_w: int
+        self,
+        preds: torch.tensor,
+        processed_sizes: List[Tuple[int, int]],
+        original_sizes: List[Tuple[int, int]],
     ):
-        output = self.preds_postprocess(preds, (processed_h, processed_w), (origin_h, origin_w))
+        output = self._preds_postprocess(preds, processed_sizes, original_sizes)
         output = filter_preds(output, self.conf_thresh)
 
         for res in output:
@@ -202,22 +205,19 @@ class Torch_model:
             res["scores"] = res["scores"].cpu().numpy()
         return output
 
-    def _predict(self, img) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-        return self.model(img)
-
     @torch.no_grad()
-    def __call__(self, image: NDArray[np.uint8]):
+    def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, np.ndarray]]:
         """
-        Input image as ndarray, BGR, HWC
+        Input image as ndarray (BGR, HWC) or BHWC
         Output:
             List of batch size length. Each element is a dict {"labels", "boxes", "scores"}
             labels: np.ndarray of shape (N,), dtype np.int64
             boxes: np.ndarray of shape (N, 4), dtype np.float32
             scores: np.ndarray of shape (N,), dtype np.float32
         """
-        processed_image = self._preprocess(image)
-        pred = self._predict(processed_image)
-        return self._postprocess(pred, *processed_image.shape[2:4], image.shape[0], image.shape[1])
+        processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(inputs)
+        preds = self._predict(processed_inputs)
+        return self._postprocess(preds, processed_sizes, original_sizes)
 
 
 def letterbox(
@@ -261,65 +261,6 @@ def letterbox(
         im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color
     )  # add border
     return im, ratio, (dw, dh)
-
-
-# def non_max_suppression(boxes, scores, classes, score_threshold=0.5, iou_threshold=0.5):
-#     """
-#     Applies Non-Maximum Suppression (NMS) to filter bounding boxes.
-
-#     Parameters:
-#     - boxes (torch.Tensor): Tensor of shape (N, 4) containing bounding boxes in [x1, y1, x2, y2] format.
-#     - scores (torch.Tensor): Tensor of shape (N,) containing confidence scores for each box.
-#     - classes (torch.Tensor): Tensor of shape (N,) containing class indices for each box.
-#     - score_threshold (float): Minimum confidence score to consider a box for NMS.
-#     - iou_threshold (float): Intersection Over Union (IOU) threshold for NMS.
-
-#     Returns:
-#     - filtered_boxes (torch.Tensor): Tensor containing filtered bounding boxes after NMS.
-#     - filtered_scores (torch.Tensor): Tensor containing confidence scores of the filtered boxes.
-#     - filtered_classes (torch.Tensor): Tensor containing class indices of the filtered boxes.
-#     """
-#     # Step 1: Filter out boxes with confidence scores below the threshold
-#     score_mask = scores >= score_threshold
-#     boxes = boxes[score_mask]
-#     scores = scores[score_mask]
-#     classes = classes[score_mask]
-
-#     # Prepare lists to collect the filtered boxes, scores, and classes
-#     filtered_boxes = []
-#     filtered_scores = []
-#     filtered_classes = []
-
-#     # Get unique classes present in the detections
-#     unique_classes = classes.unique()
-
-#     # Step 2: Perform NMS for each class separately
-#     for unique_class in unique_classes:
-#         # Get indices of boxes belonging to the current class
-#         cls_mask = classes == unique_class
-#         cls_boxes = boxes[cls_mask]
-#         cls_scores = scores[cls_mask]
-
-#         # Apply NMS for the current class
-#         nms_indices = nms(cls_boxes, cls_scores, iou_threshold)
-
-#         # Collect the filtered boxes, scores, and classes
-#         filtered_boxes.append(cls_boxes[nms_indices])
-#         filtered_scores.append(cls_scores[nms_indices])
-#         filtered_classes.append(classes[cls_mask][nms_indices])
-
-#     # Step 3: Concatenate the results
-#     if filtered_boxes:
-#         filtered_boxes = torch.cat(filtered_boxes)
-#         filtered_scores = torch.cat(filtered_scores)
-#         filtered_classes = torch.cat(filtered_classes)
-#     else:
-#         # If no boxes remain after NMS, return empty tensors
-#         filtered_boxes = torch.empty((0, 4))
-#         filtered_scores = torch.empty((0,))
-#         filtered_classes = torch.empty((0,), dtype=classes.dtype)
-
-#     return filtered_boxes, filtered_scores, filtered_classes
 
 
 def clip_boxes(boxes, shape):
@@ -392,3 +333,12 @@ def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int) -> np.ndar
         x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
         y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
         return torch.stack([x_min, y_min, x_max, y_max], dim=1)
+
+
+def filter_preds(preds, conf_thresh):
+    for pred in preds:
+        keep_idxs = pred["scores"] >= conf_thresh
+        pred["scores"] = pred["scores"][keep_idxs]
+        pred["boxes"] = pred["boxes"][keep_idxs]
+        pred["labels"] = pred["labels"][keep_idxs]
+    return preds

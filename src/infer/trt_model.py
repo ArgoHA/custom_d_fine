@@ -7,8 +7,6 @@ import torch
 import torch.nn.functional as F
 from numpy.typing import NDArray
 
-from src.dl.utils import filter_preds
-
 
 class TRT_model:
     def __init__(
@@ -18,7 +16,6 @@ class TRT_model:
         input_width: int = 640,
         input_height: int = 640,
         conf_thresh: float = 0.5,
-        iou_thresh: float = 0.5,
         rect: bool = False,  # No need for rectangular inference with fixed size
         half: bool = False,
         keep_ratio: bool = True,
@@ -28,11 +25,10 @@ class TRT_model:
         self.n_outputs = n_outputs
         self.model_path = model_path
         self.conf_thresh = conf_thresh
-        self.iou_thresh = iou_thresh
         self.rect = rect
         self.half = half
         self.keep_ratio = keep_ratio
-        self.debug_mode = False
+        self.channels = 3
 
         if not device:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -66,49 +62,16 @@ class TRT_model:
         else:
             raise TypeError(f"Unsupported TensorRT data type: {trt_dtype}")
 
-    def _preprocess(self, img: NDArray, stride: int = 32) -> torch.Tensor:
-        if not self.keep_ratio:
-            img = cv2.resize(img, (self.input_size[1], self.input_size[0]), cv2.INTER_AREA)
-        else:
-            img = letterbox(
-                img, (self.input_size[1], self.input_size[0]), stride=stride, auto=False
-            )[0]
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, then HWC to CHW
-        img = np.ascontiguousarray(img, dtype=self.np_dtype)
-        img /= 255.0
-        img = img.reshape([1, *img.shape])  # Add batch dimension
-
-        # Save debug image if needed
-        if self.debug_mode:
-            debug_img = img[0].transpose(1, 2, 0)  # CHW to HWC
-            debug_img = (debug_img * 255.0).astype(np.uint8)  # Convert to uint8
-            debug_img = debug_img[:, :, ::-1]  # RGB to BGR for saving
-            cv2.imwrite("trt_infer.jpg", debug_img)
-        return torch.from_numpy(img).to(self.device)
-
     def _test_pred(self) -> None:
         random_image = np.random.randint(
-            0, 255, size=(self.input_size[1], self.input_size[0], 3), dtype=np.uint8
+            0, 255, size=(self.input_size[1], self.input_size[0], self.channels), dtype=np.uint8
         )
-        processed_image = self._preprocess(random_image)
-        preds = self._predict(processed_image)
-        self._postprocess(
-            preds,
-            *processed_image.shape[2:4],
-            random_image.shape[0],
-            random_image.shape[1],
-        )
+        processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(random_image)
+        preds = self._predict(processed_inputs)
+        self._postprocess(preds, processed_sizes, original_sizes)
 
     @staticmethod
-    def process_boxes(boxes, processed_size, orig_size, keep_ratio, device):
-        bs = 1
-        processed_sizes = (
-            np.array((processed_size[0], processed_size[1]))[None].repeat(bs, 1)  # bs 1
-        )
-        orig_sizes = (
-            np.array((orig_size[0], orig_size[1]))[None].repeat(bs, 1)  # bs 1
-        )
-
+    def process_boxes(boxes, processed_sizes, orig_sizes, keep_ratio, device):
         boxes = boxes.cpu().numpy()
         final_boxes = np.zeros_like(boxes)
         for idx, box in enumerate(boxes):
@@ -116,7 +79,7 @@ class TRT_model:
                 box, processed_sizes[idx][0], processed_sizes[idx][1]
             )
 
-        for i in range(bs):
+        for i in range(len(orig_sizes)):
             if keep_ratio:
                 final_boxes[i] = scale_boxes_ratio_kept(
                     final_boxes[i],
@@ -131,11 +94,11 @@ class TRT_model:
                 )
         return torch.tensor(final_boxes).to(device)
 
-    def preds_postprocess(
+    def _preds_postprocess(
         self,
         outputs,
-        processed_size,
-        orig_size,
+        processed_sizes,
+        original_sizes,
         num_top_queries=300,
         use_focal_loss=True,
     ) -> List[Dict[str, torch.Tensor]]:
@@ -144,7 +107,7 @@ class TRT_model:
         """
         logits, boxes = outputs[0], outputs[1]
         boxes = self.process_boxes(
-            boxes, processed_size, orig_size, self.keep_ratio, self.device
+            boxes, processed_sizes, original_sizes, self.keep_ratio, self.device
         )  # B x TopQ x 4
 
         if use_focal_loss:
@@ -169,17 +132,56 @@ class TRT_model:
             results.append(result)
         return results
 
-    def _postprocess(
-        self, preds: torch.tensor, processed_h: int, processed_w: int, origin_h: int, origin_w: int
-    ):
-        output = self.preds_postprocess(preds, (processed_h, processed_w), (origin_h, origin_w))
-        output = filter_preds(output, self.conf_thresh)
+    def _compute_nearest_size(self, shape, target_size, stride=32) -> Tuple[int, int]:
+        """
+        Get nearest size that is divisible by 32
+        """
+        scale = target_size / max(shape)
+        new_shape = [int(round(dim * scale)) for dim in shape]
 
-        for res in output:
-            res["labels"] = res["labels"].cpu().numpy()
-            res["boxes"] = res["boxes"].cpu().numpy()
-            res["scores"] = res["scores"].cpu().numpy()
-        return output
+        # Make sure new dimensions are divisible by the stride
+        new_shape = [max(stride, int(np.ceil(dim / stride) * stride)) for dim in new_shape]
+        return new_shape
+
+    def _preprocess(self, img: NDArray, stride: int = 32) -> torch.tensor:
+        if not self.keep_ratio:  # simple resize
+            img = cv2.resize(img, (self.input_size[1], self.input_size[0]), cv2.INTER_LINEAR)
+        elif self.rect:  # keep ratio and cut paddings
+            target_height, target_width = self._compute_nearest_size(
+                img.shape[:2], max(self.input_size[0], self.input_size[1])
+            )
+            img = letterbox(img, (target_height, target_width), stride=stride, auto=False)[0]
+        else:  # keep ratio adding paddings
+            img = letterbox(
+                img, (self.input_size[1], self.input_size[0]), stride=stride, auto=False
+            )[0]
+
+        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, then HWC to CHW
+        img = np.ascontiguousarray(img, dtype=self.np_dtype)
+        img /= 255.0
+        return img
+
+    def _prepare_inputs(self, inputs):
+        original_sizes = []
+        processed_sizes = []
+
+        if isinstance(inputs, np.ndarray) and inputs.ndim == 3:  # single image
+            processed_inputs = self._preprocess(inputs)[None]
+            original_sizes.append((inputs.shape[0], inputs.shape[1]))
+            processed_sizes.append((processed_inputs[0].shape[1], processed_inputs[0].shape[2]))
+
+        elif isinstance(inputs, np.ndarray) and inputs.ndim == 4:  # batch of images
+            processed_inputs = np.zeros(
+                (inputs.shape[0], self.channels, self.input_size[0], self.input_size[1]),
+                dtype=self.np_dtype,
+            )
+            for idx, image in enumerate(inputs):
+                processed_inputs[idx] = self._preprocess(image)
+                original_sizes.append((image.shape[0], image.shape[1]))
+                processed_sizes.append(
+                    (processed_inputs[idx].shape[1], processed_inputs[idx].shape[2])
+                )
+        return torch.tensor(processed_inputs).to(self.device), processed_sizes, original_sizes
 
     def _predict(self, img: torch.Tensor) -> List[torch.Tensor]:
         # Ensure the input tensor is contiguous
@@ -195,16 +197,18 @@ class TRT_model:
             binding_shape = tuple(binding_shape)  # Convert to tuple of integers
             binding_dtype = self.engine.get_binding_dtype(idx)
             torch_dtype = self._torch_dtype_from_trt(binding_dtype)
-
             if self.engine.binding_is_input(binding):
                 # Input binding
-                assert tuple(binding_shape) == tuple(
-                    img_tensor.shape
-                ), f"Input shape mismatch: expected {binding_shape}, got {img_tensor.shape}"
+                self.context.set_binding_shape(idx, tuple(img_tensor.shape))  # for dynamic shape
+                assert (
+                    tuple(self.context.get_binding_shape(idx)) == tuple(img_tensor.shape)
+                ), f"Input shape mismatch: expected {img_tensor.shape}, got {self.context.get_binding_shape(idx)}"
                 bindings[idx] = int(img_tensor.data_ptr())
             else:
                 # Output binding
-                output_tensor = torch.empty(binding_shape, dtype=torch_dtype, device=self.device)
+                output_tensor = torch.empty(
+                    (img_tensor.shape[0], *binding_shape[1:]), dtype=torch_dtype, device=self.device
+                )
                 output_tensors.append(output_tensor)
                 bindings[idx] = int(output_tensor.data_ptr())
 
@@ -214,11 +218,33 @@ class TRT_model:
         # Outputs are already on the device as PyTorch tensors
         return output_tensors
 
-    def __call__(self, image: NDArray[np.uint8]):
-        processed_image = self._preprocess(image)
-        pred = self._predict(processed_image)
-        res = self._postprocess(pred, *processed_image.shape[2:4], image.shape[0], image.shape[1])
-        return res
+    def _postprocess(
+        self,
+        preds: torch.tensor,
+        processed_sizes: List[Tuple[int, int]],
+        original_sizes: List[Tuple[int, int]],
+    ):
+        output = self._preds_postprocess(preds, processed_sizes, original_sizes)
+        output = filter_preds(output, self.conf_thresh)
+
+        for res in output:
+            res["labels"] = res["labels"].cpu().numpy()
+            res["boxes"] = res["boxes"].cpu().numpy()
+            res["scores"] = res["scores"].cpu().numpy()
+        return output
+
+    def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, np.ndarray]]:
+        """
+        Input image as ndarray (BGR, HWC) or BHWC
+        Output:
+            List of batch size length. Each element is a dict {"labels", "boxes", "scores"}
+            labels: np.ndarray of shape (N,), dtype np.int64
+            boxes: np.ndarray of shape (N, 4), dtype np.float32
+            scores: np.ndarray of shape (N,), dtype np.float32
+        """
+        processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(inputs)
+        preds = self._predict(processed_inputs)
+        return self._postprocess(preds, processed_sizes, original_sizes)
 
 
 def letterbox(
@@ -334,3 +360,12 @@ def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int) -> np.ndar
         x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
         y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
         return torch.stack([x_min, y_min, x_max, y_max], dim=1)
+
+
+def filter_preds(preds, conf_thresh):
+    for pred in preds:
+        keep_idxs = pred["scores"] >= conf_thresh
+        pred["scores"] = pred["scores"][keep_idxs]
+        pred["boxes"] = pred["boxes"][keep_idxs]
+        pred["labels"] = pred["labels"][keep_idxs]
+    return preds
