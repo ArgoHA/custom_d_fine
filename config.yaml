@@ -1,9 +1,10 @@
 project_name: vis_drone # for wandb
-exp_name: test_x
+exp_name: s
 
 exp: ${exp_name}_${now_dir}
+# exp: ema_98_55_2025-02-11
 
-model_name: x # model size (n, s, m, l, x)
+model_name: s # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
@@ -90,9 +91,9 @@ split:
 
 
 export: # TensorRT must be done on the inference device
-  half: False # fp16, not needed for Openvino
-  max_batch_size: 1 # TODO
-  dynamic_input: False # not for TensorRT, limited for OpenVino
+  half: False # torch, tensorrt
+  max_batch_size: 1 # tensorrt
+  dynamic_input: False # torch, openvino cpu only
 
 
 
