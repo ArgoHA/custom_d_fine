@@ -16,6 +16,7 @@ from tqdm import tqdm
 from src.dl.dataset import CustomDataset, Loader
 from src.dl.utils import process_boxes, vis_one_box
 from src.dl.validator import Validator
+from src.infer.ov_model import OV_model
 from src.infer.torch_model import Torch_model
 from src.infer.trt_model import TRT_model
 from src.infer.ultra_model import UltraModel
@@ -143,12 +144,10 @@ def main(cfg: DictConfig):
         n_outputs=len(cfg.train.label_to_name),
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
-        conf_thresh=conf_thresh + 0.3,
-        iou_thresh=iou_thresh,
+        conf_thresh=conf_thresh + 0.25,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
-        # device="cpu",
     )
 
     trt_model = TRT_model(
@@ -156,21 +155,40 @@ def main(cfg: DictConfig):
         n_outputs=len(cfg.train.label_to_name),
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
-        conf_thresh=conf_thresh + 0.3,
-        iou_thresh=iou_thresh,
+        conf_thresh=conf_thresh + 0.25,
         rect=False,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
     )
 
+    ov_model = OV_model(
+        model_name=cfg.model_name,
+        model_path=Path(cfg.train.path_to_save) / "model.xml",
+        n_outputs=len(cfg.train.label_to_name),
+        input_width=cfg.train.img_size[1],
+        input_height=cfg.train.img_size[0],
+        conf_thresh=conf_thresh + 0.25,
+        rect=cfg.export.dynamic_input,
+        half=cfg.export.half,
+        keep_ratio=cfg.train.keep_ratio,
+        max_batch_size=1,
+    )
+
     ultra_model = UltraModel(
+        model_path=Path(
+            "/home/argo/Desktop/Projects/Veryfi/vis_drone/runs/detect/train11/weights/best_openvino_model"
+        ),
+        conf_thresh=conf_thresh,
+        iou_thresh=iou_thresh,
+        img_size=cfg.train.img_size[0],
+    )
+    ultra_model_trt = UltraModel(
         model_path=Path(
             "/home/argo/Desktop/Projects/Veryfi/vis_drone/runs/detect/train11/weights/best.engine"
         ),
         conf_thresh=conf_thresh,
         iou_thresh=iou_thresh,
         img_size=cfg.train.img_size[0],
-        # device="cpu",
     )
 
     data_path = Path(cfg.train.data_path)
@@ -185,7 +203,9 @@ def main(cfg: DictConfig):
 
     all_metrics = {}
     models = {
-        "Ultralytics": ultra_model,
+        "Ultralytics_ov": ultra_model,
+        "Ultralytics_trt": ultra_model_trt,
+        "OpenVINO": ov_model,
         "Torch": torch_model,
         "TensorRT": trt_model,
     }

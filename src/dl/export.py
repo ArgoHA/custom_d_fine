@@ -16,7 +16,7 @@ INPUT_NAME = "input"
 OUTPUT_NAME = "output"
 
 
-def prepare_model(cfg, model_path, device):
+def prepare_model(cfg, device):
     model = build_model(cfg.model_name, len(cfg.train.label_to_name), device)
     model.load_state_dict(torch.load(Path(cfg.train.path_to_save) / "model.pt", weights_only=True))
     model.eval()
@@ -65,6 +65,8 @@ def export_to_onnx(
     )
 
     onnx_model = onnx.load(output_path)
+    # if half:
+    #     onnx_model = float16.convert_float_to_float16(onnx_model, keep_io_types=True)
 
     try:
         onnx_model, check = onnxsim.simplify(onnx_model)
@@ -77,10 +79,19 @@ def export_to_onnx(
         return output_path
 
 
-def export_to_openvino(onnx_path: Path, x_test, dynamic_input: bool, half: bool) -> None:
+def export_to_openvino(onnx_path: Path, x_test, dynamic_input: bool, max_batch_size: int) -> None:
+    if not dynamic_input and max_batch_size <= 1:
+        inp = None
+    elif max_batch_size > 1 and dynamic_input:
+        inp = [-1, 3, -1, -1]
+    elif max_batch_size > 1:
+        inp = [-1, *x_test.shape[1:]]
+    elif dynamic_input:
+        inp = [1, 3, -1, -1]
+
     model = ov.convert_model(
         input_model=str(onnx_path),
-        input=None if dynamic_input else [x_test.shape],
+        input=inp,
         example_input=x_test,
     )
     ov.serialize(model, str(onnx_path.with_suffix(".xml")), str(onnx_path.with_suffix(".bin")))
@@ -91,12 +102,7 @@ def export_to_tensorrt(
     onnx_file_path: Path,
     half: bool,
     max_batch_size: int,
-    dynamic_input: bool,
-    max_shape: tuple,
 ) -> None:
-    opt_shape = max_shape
-    min_shape = max_shape[0], max_shape[1], max_shape[2] // 2, max_shape[3] // 2
-
     tr_logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(tr_logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
@@ -114,20 +120,18 @@ def export_to_tensorrt(
     if half:
         config.set_flag(trt.BuilderFlag.FP16)
 
-    # Create an optimization profile for batching and dynamic shapes
-    if False:
+    if max_batch_size > 1:
         profile = builder.create_optimization_profile()
-        input_name = network.get_input(0).name  # Assumes single input
+        input_name = network.get_input(0).name
+        input_shape = network.get_input(0).shape  # e.g., [batch, channels, height, width]
+
+        # Set the minimum and optimal batch size to 1, and allow the maximum batch size as provided.
+        min_shape = (1, *input_shape[1:])
+        opt_shape = (1, *input_shape[1:])
+        max_shape = (max_batch_size, *input_shape[1:])
+
         profile.set_shape(input_name, min_shape, opt_shape, max_shape)
         config.add_optimization_profile(profile)
-    else:
-        if max_batch_size > 1:
-            profile = builder.create_optimization_profile()
-            input_name = network.get_input(0).name  # Assumes single input
-            input_shape = network.get_input(0).shape
-            static_shape = (max_batch_size, *input_shape[1:])
-            profile.set_shape(input_name, static_shape, static_shape, static_shape)
-            config.add_optimization_profile(profile)
 
     engine = builder.build_serialized_network(network, config)
     with open(onnx_file_path.with_suffix(".engine"), "wb") as f:
@@ -140,7 +144,7 @@ def main(cfg: DictConfig):
     device = cfg.train.device
     model_path = Path(cfg.train.path_to_save) / "model.pt"
 
-    model = prepare_model(cfg, model_path, device)
+    model = prepare_model(cfg, device)
     x_test = torch.randn(cfg.export.max_batch_size, 3, *cfg.train.img_size).to(device)
     _ = model(x_test)
 
@@ -152,7 +156,7 @@ def main(cfg: DictConfig):
         cfg.export.half,
         cfg.export.dynamic_input,
     )
-    export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, cfg.export.half)
+    export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
 
     static_onnx_path = export_to_onnx(
         model,
@@ -166,8 +170,6 @@ def main(cfg: DictConfig):
         static_onnx_path,
         cfg.export.half,
         cfg.export.max_batch_size,
-        cfg.export.dynamic_input,
-        x_test.shape,
     )
 
     logger.info(f"Exports saved to: {model_path.parent}")
