@@ -5,10 +5,11 @@ loguru==0.7.2
 matplotlib==3.8.0
 numpy==1.23.5
 omegaconf==2.3.0
-onnx==1.16.2
-onnxruntime==1.18.0
-onnxruntime_gpu==1.18.0
-onnxsim==0.4.33
+onnx==1.17.0
+onnxconverter-common==1.14.0
+onnxruntime==1.20.1
+onnxruntime_gpu==1.20.1
+onnxsim==0.4.36
 opencv_python==4.7.0.72
 opencv_python_headless==4.10.0.84
 openvino==2024.3.0
