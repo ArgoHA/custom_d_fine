@@ -21,6 +21,7 @@ python -m src.dl.subm          # Creates a submition file for DL Enigma Kaggle c
 Use inference classes in `src/infer`. Currently available:
 - Torch
 - TensorRT
+- OpenVINO
 
 ## Outputs
 - **Models**: Saved during the training process and export at `output/models/exp_name_date`. Includes training logs, table with main metrics, confusion matrics, f1-score_vs_threshold and precisino_recall_vs_threshold.
@@ -45,8 +46,8 @@ Use inference classes in `src/infer`. Currently available:
 
 ## Features
 - Training pipeline from SoTA D-FINE model
-- Export to ONNX, OpenVino, TensorRT. Half precision included
-- Inference class for Torch and TensorRT
+- Export to ONNX, OpenVino, TensorRT.
+- Inference class for Torch, TensorRT, OpenVINO
 
 - Augs based on the [albumentations](https://albumentations.ai) lib
 - Mosaic augmentation
@@ -66,11 +67,10 @@ Use inference classes in `src/infer`. Currently available:
 - ETA displayed during training, precise strating epoch 2
 - Logging file with training process
 - WandB integration
+- Batch inference
 
 ## TODO
 - Implement multiscale aug
-- Batch inference
-- Add OpenVino inference class
 - Finetune with layers freeze
 - Add support for cashing in dataset
 - Add support for multi GPU training
