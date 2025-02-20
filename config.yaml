@@ -91,7 +91,7 @@ split:
 
 export: # TensorRT must be done on the inference device
   half: False # torch, tensorrt
-  max_batch_size: 1 # tensorrt
+  max_batch_size: 1 # torch, tensorrt
   dynamic_input: False # torch, openvino cpu only
 
 
