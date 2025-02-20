@@ -19,7 +19,6 @@ from src.dl.validator import Validator
 from src.infer.ov_model import OV_model
 from src.infer.torch_model import Torch_model
 from src.infer.trt_model import TRT_model
-from src.infer.ultra_model import UltraModel
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
