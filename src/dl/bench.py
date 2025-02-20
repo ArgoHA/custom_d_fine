@@ -174,23 +174,6 @@ def main(cfg: DictConfig):
         max_batch_size=1,
     )
 
-    ultra_model = UltraModel(
-        model_path=Path(
-            "/home/argo/Desktop/Projects/Veryfi/vis_drone/runs/detect/train11/weights/best_openvino_model"
-        ),
-        conf_thresh=conf_thresh,
-        iou_thresh=iou_thresh,
-        img_size=cfg.train.img_size[0],
-    )
-    ultra_model_trt = UltraModel(
-        model_path=Path(
-            "/home/argo/Desktop/Projects/Veryfi/vis_drone/runs/detect/train11/weights/best.engine"
-        ),
-        conf_thresh=conf_thresh,
-        iou_thresh=iou_thresh,
-        img_size=cfg.train.img_size[0],
-    )
-
     data_path = Path(cfg.train.data_path)
     val_loader, test_loader = BenchLoader(
         root_path=data_path,
@@ -203,8 +186,6 @@ def main(cfg: DictConfig):
 
     all_metrics = {}
     models = {
-        "Ultralytics_ov": ultra_model,
-        "Ultralytics_trt": ultra_model_trt,
         "OpenVINO": ov_model,
         "Torch": torch_model,
         "TensorRT": trt_model,
