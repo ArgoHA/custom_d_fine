@@ -59,14 +59,12 @@ def main(cfg: DictConfig):
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
         conf_thresh=cfg.train.conf_thresh,
-        iou_thresh=cfg.train.iou_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
     )
 
-    # folder_path = Path(cfg.train.data_path).parent / "dt_test"
     folder_path = Path(cfg.train.path_to_test_data)
-    output_path = Path(cfg.train.root) / "output" / "auto_annotate"
+    output_path = Path(cfg.train.root) / "output" / "infer"
 
     run(torch_model, folder_path, output_path)
 
