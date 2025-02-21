@@ -300,23 +300,6 @@ class Loader:
             else:
                 self.splits[split_name] = []
 
-    # def _get_label_stats(self) -> Dict:
-    #     classes = {class_name: 0 for class_name in self.class_names}
-    #     for split in self.splits.values():
-    #         if not np.any(split):
-    #             continue
-    #         for image_path in split.iloc[:, 0]:
-    #             labels_path = self.root_path / "labels" / f"{Path(image_path).stem}.txt"
-    #             if not (labels_path.exists() and labels_path.stat().st_size):
-    #                 continue
-    #             targets = np.loadtxt(labels_path)
-    #             if targets.ndim == 1:
-    #                 targets = targets.reshape(1, -1)
-    #             labels = targets[:, 0]
-    #             for class_id in labels:
-    #                 classes[self.class_names[int(class_id)]] += 1
-    #     return classes
-
     def _get_label_stats(self) -> Dict:
         if self.use_one_class:
             classes = {"target": 0}
