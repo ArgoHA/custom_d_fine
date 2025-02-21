@@ -24,7 +24,7 @@ def swap_labels(labels_path, output_path, label_old, label_new):
 
 
 def main():
-    labels_path = Path("/home/argo/Desktop/Projects/Veryfi/dt/data/dataset/labels")
+    labels_path = Path("")
     output_path = labels_path.parent / f"{labels_path.name}_swapped"
     label_old = 2
     label_new = 0
