@@ -2,7 +2,18 @@
 This is a custom project to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection model based on RT-DETR.
 
 ## Configuration
-Check config.yaml for configs
+Check config.yaml for configs. Must specify:
+- root
+- pretrained_model_path
+- data_path
+- label_to_name
+
+Common configs to change:
+- batch size
+- epochs
+- num_workers
+- b_accum_steps
+
 
 ## Usage
 To run the scripts, use the following commands:

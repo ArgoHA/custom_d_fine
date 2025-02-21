@@ -1,5 +1,5 @@
 project_name: vis_drone # for wandb
-exp_name: s_model
+exp_name: s
 
 exp: ${exp_name}_${now_dir}
 
@@ -7,7 +7,7 @@ model_name: s # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/Veryfi/vis_drone/ # project root with dataset and outputs
+  root: /home/argo/Desktop/Projects/vis_drone/ # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
   pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
@@ -17,7 +17,7 @@ train:
 
   ### Configs ###
   device: cuda
-  label_to_name:
+  label_to_name: # dataset's classes
     0: pedestrian
     1: people
     2: bicycle
