@@ -1,5 +1,5 @@
 project_name: vis_drone # for wandb
-exp_name: s
+exp_name: baseline
 
 exp: ${exp_name}_${now_dir}
 
