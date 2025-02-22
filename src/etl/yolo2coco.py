@@ -26,10 +26,6 @@ def yolo_to_coco(labels_dir, images_dir, output_file, split, categories_list=Non
         if str(label_file.name).endswith(".txt") and str(label_file.name) in split[0].tolist():
             label_files.append(label_file.name)
 
-    print(split[0].tolist())
-
-    print(label_files)
-
     for label_file in label_files:
         image_filename = os.path.splitext(label_file)[0]
         # Try to find image file with common image extensions

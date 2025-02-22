@@ -9,6 +9,8 @@ Check config.yaml for configs. Must specify:
 - label_to_name
 
 Common configs to change:
+- exp_name
+- model_name
 - batch size
 - epochs
 - num_workers
@@ -24,8 +26,6 @@ python -m src.dl.train          # Runs the training pipeline
 python -m src.dl.export         # Exports weights in various formats after training
 python -m src.dl.bench          # Runs all exported models on the test set
 python -m src.dl.infer          # Runs model ontest folder, saves visualisations and txt preds
-
-python -m src.dl.subm           # Creates a submition file for DL Enigma Kaggle challenge
 ```
 
 ## Inference
