@@ -1,5 +1,5 @@
-# Custom Object Detection training, exporting, inference pipeline
-This is a custom project to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection model based on RT-DETR.
+# Custom SoTA Object Detection D-FINE model training, exporting, inferencing pipeline
+This is a custom project to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection transformer based model. Model author's repo: [D-FINE](https://github.com/Peterande/D-FINE).
 
 ## Configuration
 Check config.yaml for configs. Must specify:
