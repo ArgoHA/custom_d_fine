@@ -286,7 +286,34 @@ class Trainer:
     def train(self) -> None:
         best_metric = 0
         cur_iter = 0
+        ema_iter = 0
         one_epoch_time = None
+
+        def optimizer_step(step_scheduler: bool):
+            """
+            Clip grads, optimizer step, sceduler step, , zero grad, EMA model update
+            """
+            nonlocal ema_iter
+            if self.amp_enabled:
+                if self.clip_max_norm:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+            else:
+                if self.clip_max_norm:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
+                self.optimizer.step()
+
+            if step_scheduler:
+                self.scheduler.step()
+            self.optimizer.zero_grad()
+
+            if self.ema_model:
+                ema_iter += 1
+                self.ema_model.update(ema_iter, self.model)
+
         for epoch in range(1, self.epochs + 1):
             epoch_start_time = time.time()
             self.model.train()
@@ -317,19 +344,7 @@ class Trainer:
                         with autocast(self.device, enabled=False):
                             loss_dict = self.loss_fn(output, targets)
                         loss = sum(loss_dict.values())
-
                         self.scaler.scale(loss).backward()
-
-                        if (batch_idx + 1) % self.b_accum_steps == 0:
-                            if self.clip_max_norm:
-                                self.scaler.unscale_(self.optimizer)
-                                torch.nn.utils.clip_grad_norm_(
-                                    self.model.parameters(), self.clip_max_norm
-                                )
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                            self.scheduler.step()
-                            self.optimizer.zero_grad()
 
                     else:
                         output = self.model(inputs, targets=targets)
@@ -337,17 +352,8 @@ class Trainer:
                         loss = sum(loss_dict.values())
                         loss.backward()
 
-                        if (batch_idx + 1) % self.b_accum_steps == 0:
-                            if self.clip_max_norm:
-                                torch.nn.utils.clip_grad_norm_(
-                                    self.model.parameters(), self.clip_max_norm
-                                )
-                            self.optimizer.step()
-                            self.scheduler.step()
-                            self.optimizer.zero_grad()
-
-                    if self.ema_model and batch_idx % self.b_accum_steps == 0:
-                        self.ema_model.update(cur_iter, self.model)
+                    if (batch_idx + 1) % self.b_accum_steps == 0:
+                        optimizer_step(step_scheduler=True)
 
                     losses.append(loss.item())
 
@@ -363,6 +369,10 @@ class Trainer:
                         ),
                         vram=f"{get_vram_usage()}%",
                     )
+
+            # Final update for any leftover gradients from an incomplete accumulation step
+            if (batch_idx + 1) % self.b_accum_steps != 0:
+                optimizer_step(step_scheduler=False)
 
             wandb.log({"lr": lr, "epoch": epoch})
 
