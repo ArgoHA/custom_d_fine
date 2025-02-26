@@ -14,7 +14,19 @@ from src.dl.utils import filter_preds
 
 
 class Validator:
-    def __init__(self, gt, preds, conf_thresh=0.4, iou_thresh=0.4) -> None:
+    def __init__(
+        self,
+        gt: List[Dict[str, torch.Tensor]],
+        preds: List[Dict[str, torch.Tensor]],
+        conf_thresh=0.5,
+        iou_thresh=0.5,
+    ) -> None:
+        """
+        Format example:
+        gt = [{'labels': tensor([0]), 'boxes': tensor([[561.0, 297.0, 661.0, 359.0]])}, ...]
+        len(gt) is the number of images
+        bboxes are in format [x1, y1, x2, y2], absolute values
+        """
         self.gt = gt
         self.preds = preds
         self.conf_thresh = conf_thresh

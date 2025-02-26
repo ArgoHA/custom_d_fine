@@ -381,6 +381,11 @@ def scale_boxes_ratio_kept(boxes, img0_shape, img1_shape, ratio_pad=None, paddin
 
 
 def scale_boxes(boxes, orig_shape, resized_shape):
+    '''
+    boxes in format: [x1, y1, x2, y2], absolute values
+    orig_shape: [height, width]
+    resized_shape: [height, width]
+    '''
     scale_x = orig_shape[1] / resized_shape[1]
     scale_y = orig_shape[0] / resized_shape[0]
     boxes[:, 0] *= scale_x

@@ -33,7 +33,7 @@ from src.dl.validator import Validator
 from src.ptypes import num_labels
 
 
-class ema_model:
+class ModelEMA:
     def __init__(self, student, ema_momentum):
         self.model = deepcopy(student).eval()
         for param in self.model.parameters():
@@ -105,7 +105,7 @@ class Trainer:
         self.ema_model = None
         if self.cfg.train.use_ema:
             logger.info("EMA model will be evaluated and saved")
-            self.ema_model = ema_model(self.model, cfg.train.ema_momentum)
+            self.ema_model = ModelEMA(self.model, cfg.train.ema_momentum)
 
         self.loss_fn = build_loss(cfg.model_name, num_labels)
 
@@ -291,7 +291,7 @@ class Trainer:
 
         def optimizer_step(step_scheduler: bool):
             """
-            Clip grads, optimizer step, sceduler step, , zero grad, EMA model update
+            Clip grads, optimizer step, scheduler step, zero grad, EMA model update
             """
             nonlocal ema_iter
             if self.amp_enabled:
@@ -343,13 +343,13 @@ class Trainer:
                             output = self.model(inputs, targets=targets)
                         with autocast(self.device, enabled=False):
                             loss_dict = self.loss_fn(output, targets)
-                        loss = sum(loss_dict.values())
+                        loss = sum(loss_dict.values()) / self.b_accum_steps
                         self.scaler.scale(loss).backward()
 
                     else:
                         output = self.model(inputs, targets=targets)
                         loss_dict = self.loss_fn(output, targets)
-                        loss = sum(loss_dict.values())
+                        loss = sum(loss_dict.values()) / self.b_accum_steps
                         loss.backward()
 
                     if (batch_idx + 1) % self.b_accum_steps == 0:
@@ -358,7 +358,7 @@ class Trainer:
                     losses.append(loss.item())
 
                     tepoch.set_postfix(
-                        loss=np.mean(losses),
+                        loss=np.mean(losses) * self.b_accum_steps,
                         eta=calculate_remaining_time(
                             one_epoch_time,
                             epoch_start_time,
@@ -384,7 +384,9 @@ class Trainer:
             )
 
             best_metric = self.save_model(metrics, best_metric)
-            save_metrics({}, metrics, np.mean(losses), epoch, path_to_save=None)
+            save_metrics(
+                {}, metrics, np.mean(losses) * self.b_accum_steps, epoch, path_to_save=None
+            )
 
             if (
                 epoch >= self.epochs - self.no_mosaic_epochs
