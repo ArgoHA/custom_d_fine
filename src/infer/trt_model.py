@@ -24,11 +24,15 @@ class TRT_model:
         self.input_size = (input_width, input_height)
         self.n_outputs = n_outputs
         self.model_path = model_path
-        self.conf_thresh = conf_thresh
         self.rect = rect
         self.half = half
         self.keep_ratio = keep_ratio
         self.channels = 3
+
+        if isinstance(conf_thresh, float):
+            self.conf_threshs = [conf_thresh] * self.n_outputs
+        elif isinstance(conf_thresh, list):
+            self.conf_threshs = conf_thresh
 
         if not device:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -225,7 +229,7 @@ class TRT_model:
         original_sizes: List[Tuple[int, int]],
     ):
         output = self._preds_postprocess(preds, processed_sizes, original_sizes)
-        output = filter_preds(output, self.conf_thresh)
+        output = filter_preds(output, self.conf_threshs)
 
         for res in output:
             res["labels"] = res["labels"].cpu().numpy()
@@ -362,10 +366,11 @@ def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int) -> np.ndar
         return torch.stack([x_min, y_min, x_max, y_max], dim=1)
 
 
-def filter_preds(preds, conf_thresh):
+def filter_preds(preds, conf_threshs: List[float]):
+    conf_threshs = torch.tensor(conf_threshs, device=preds[0]["scores"].device)
     for pred in preds:
-        keep_idxs = pred["scores"] >= conf_thresh
-        pred["scores"] = pred["scores"][keep_idxs]
-        pred["boxes"] = pred["boxes"][keep_idxs]
-        pred["labels"] = pred["labels"][keep_idxs]
+        mask = pred["scores"] >= conf_threshs[pred["labels"]]
+        pred["scores"] = pred["scores"][mask]
+        pred["boxes"] = pred["boxes"][mask]
+        pred["labels"] = pred["labels"][mask]
     return preds
