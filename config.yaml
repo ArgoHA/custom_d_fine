@@ -39,9 +39,9 @@ train:
   clip_max_norm: 0.1 # gradient clipping
 
   batch_size: 4 # physical, should fit on the device
-  b_accum_steps: 4 # use batch accumulation x * batch size. >= 1
+  b_accum_steps: 1 # grad accumulation (n * bs)
   epochs: 55
-  ignore_background_epochs: 0 # background images are not used for N epochs
+  ignore_background_epochs: 0 # background images are not used for N epochs in train set
   num_workers: 12
 
   ### Validation ###

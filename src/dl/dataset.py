@@ -242,7 +242,7 @@ class CustomDataset(Dataset):
         else:
             image, targets, orig_size = self._get_data(idx)  # boxes in abs xyxy format
 
-            if self.ignore_background and np.all(targets == 0):
+            if self.ignore_background and np.all(targets == 0) and self.mode == "train":
                 return None
 
             box_heights = targets[:, 3] - targets[:, 1]
