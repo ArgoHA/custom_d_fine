@@ -326,7 +326,6 @@ def visualize(img_paths, gt, preds, dataset_path, path_to_save):
       - Green bboxes for GT
       - Blue bboxes for preds
     """
-    rmtree(path_to_save, ignore_errors=True)
     path_to_save.mkdir(parents=True, exist_ok=True)
 
     for i, (gt_dict, pred_dict, img_path) in enumerate(zip(gt, preds, img_paths)):
@@ -381,11 +380,11 @@ def scale_boxes_ratio_kept(boxes, img0_shape, img1_shape, ratio_pad=None, paddin
 
 
 def scale_boxes(boxes, orig_shape, resized_shape):
-    '''
+    """
     boxes in format: [x1, y1, x2, y2], absolute values
     orig_shape: [height, width]
     resized_shape: [height, width]
-    '''
+    """
     scale_x = orig_shape[1] / resized_shape[1]
     scale_y = orig_shape[0] / resized_shape[0]
     boxes[:, 0] *= scale_x

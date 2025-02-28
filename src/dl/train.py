@@ -224,7 +224,7 @@ class Trainer:
                 all_preds.append(pred_instance)
                 all_gt.append(gt_instance)
 
-            if not idx and self.to_visualize_eval:
+            if self.to_visualize_eval and idx <= 5:
                 visualize(
                     img_paths,
                     gt,
