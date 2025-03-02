@@ -14,7 +14,6 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
 
 from src.dl.utils import (
-    CustomPadIfNeeded,
     abs_xyxy_to_norm_xywh,
     get_mosaic_coordinate,
     norm_xywh_to_abs_xyxy,
@@ -330,6 +329,9 @@ class Loader:
         images = [
             f.stem for f in (self.root_path / "images").iterdir() if not f.stem.startswith(".")
         ]
+        for split in self.splits.values():
+            if np.any(split):
+                images = [item for item in images if item in split[0].values]
         return len(set(images) - set(labels))
 
     def _build_dataloader_impl(self, dataset: Dataset, shuffle: bool = False) -> DataLoader:
