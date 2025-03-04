@@ -24,6 +24,7 @@ scipy==1.15.1
 tensorrt==8.6.1.post1
 torchmetrics==1.6.0
 faster-coco-eval==1.6.5
+pycocotools==2.0.8
 torchvision==0.20.1
 tqdm==4.66.5
 wandb
