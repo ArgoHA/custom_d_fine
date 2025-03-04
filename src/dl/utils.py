@@ -329,7 +329,7 @@ def visualize(img_paths, gt, preds, dataset_path, path_to_save):
     path_to_save.mkdir(parents=True, exist_ok=True)
 
     for i, (gt_dict, pred_dict, img_path) in enumerate(zip(gt, preds, img_paths)):
-        img = cv2.imread(dataset_path / img_path)
+        img = cv2.imread(str(dataset_path / img_path))
 
         # Draw ground-truth boxes (green)
         for box, label in zip(gt_dict["boxes"], gt_dict["labels"]):
