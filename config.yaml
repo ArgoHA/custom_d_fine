@@ -1,5 +1,5 @@
 project_name: vis_drone # for wandb
-exp_name: baseline
+exp_name: baseline # experiment name
 
 exp: ${exp_name}_${now_dir}
 
@@ -7,7 +7,7 @@ model_name: s # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/vis_drone/ # project root with dataset and outputs
+  root: /home/argo/Desktop/Projects/vis_drone # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
   pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
@@ -41,6 +41,7 @@ train:
   batch_size: 4 # physical, should fit on the device
   b_accum_steps: 1 # grad accumulation (n * bs)
   epochs: 55
+  early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
   num_workers: 12
 

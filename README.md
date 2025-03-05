@@ -1,23 +1,7 @@
 # Custom SoTA Object Detection D-FINE model training, exporting, inferencing pipeline
 This is a custom project to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection transformer based model. Model author's repo: [D-FINE](https://github.com/Peterande/D-FINE).
 
-## Configuration
-Check config.yaml for configs. Must specify:
-- root
-- pretrained_model_path
-- data_path
-- label_to_name
-
-Common configs to change:
-- exp_name
-- model_name
-- batch size
-- epochs
-- num_workers
-- b_accum_steps
-
-
-## Usage
+## Main scripts
 To run the scripts, use the following commands:
 ```bash
 python -m src.etl.preprocess    # Converts images and PDFs to JPG format
@@ -27,6 +11,20 @@ python -m src.dl.export         # Exports weights in various formats after train
 python -m src.dl.bench          # Runs all exported models on the test set
 python -m src.dl.infer          # Runs model ontest folder, saves visualisations and txt preds
 ```
+
+## Usage example
+0. `git clone https://github.com/ArgoHA/custom_d_fine.git`
+1. Prepare your data: `images` folder and `labels` folder (txt file per image in YOLO format).
+2. Customize `config.yaml`, minimal example:
+      - `exp_name`. This is experiment name which is used in model's output folder. After you train a model, you can run export/bench/infer and it will use the model under this name + current date.
+      - `root`. Path to the directory where you store your dataset and where model outputs will be saved
+      - `data_path`. Path to the folder with `images` and `labels`
+      - `label_to_name`. Your custom dataset classes
+      - `model_name`. Choose from n/s/m/l/x model sizes.
+      - and usual things like: epochs, batch_size, num_workers. Check out config.yaml for all configs.
+3. Run `preprocess` and split `scripts` from custom_d_fine repo.
+4. Run `train` script, changing confurations, iterating, untill you get desired results.
+5. Run `export`script to create ONNX, TensorRT, OpenVINO models.
 
 ## Inference
 Use inference classes in `src/infer`. Currently available:
@@ -85,6 +83,7 @@ Use inference classes in `src/infer`. Currently available:
 - Logging file with training process
 - WandB integration
 - Batch inference
+- Early stopping
 
 ## TODO
 - Implement multiscale aug

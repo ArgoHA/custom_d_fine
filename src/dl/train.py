@@ -65,6 +65,7 @@ class Trainer:
         self.clip_max_norm = cfg.train.clip_max_norm
         self.b_accum_steps = max(cfg.train.b_accum_steps, 1)
         self.keep_ratio = cfg.train.keep_ratio
+        self.early_stopping = cfg.train.early_stopping
 
         wandb.init(
             project=cfg.project_name,
@@ -293,12 +294,16 @@ class Trainer:
             best_metric = decision_metric
             logger.info("Saving new best model🔥")
             torch.save(model_to_save.state_dict(), self.path_to_save / "model.pt")
+            self.early_stopping_steps = 0
+        else:
+            self.early_stopping_steps += 1
         return best_metric
 
     def train(self) -> None:
         best_metric = 0
         cur_iter = 0
         ema_iter = 0
+        self.early_stopping_steps = 0
         one_epoch_time = None
 
         def optimizer_step(step_scheduler: bool):
@@ -411,6 +416,10 @@ class Trainer:
                 logger.info("Including background images")
 
             one_epoch_time = time.time() - epoch_start_time
+
+            if self.early_stopping and self.early_stopping_steps >= self.early_stopping:
+                logger.info("Early stopping")
+                break
 
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
