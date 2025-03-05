@@ -1,0 +1,4 @@
+pretrained/dfine_l_coco.pth filter=lfs diff=lfs merge=lfs -text
+pretrained/dfine_l_obj2coco.pth filter=lfs diff=lfs merge=lfs -text
+pretrained/dfine_x_coco.pth filter=lfs diff=lfs merge=lfs -text
+pretrained/dfine_x_obj2coco.pth filter=lfs diff=lfs merge=lfs -text
