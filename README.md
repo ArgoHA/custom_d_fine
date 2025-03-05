@@ -22,7 +22,7 @@ python -m src.dl.infer          # Runs model ontest folder, saves visualisations
       - `label_to_name`. Your custom dataset classes
       - `model_name`. Choose from n/s/m/l/x model sizes.
       - and usual things like: epochs, batch_size, num_workers. Check out config.yaml for all configs.
-3. Run `preprocess` and split `scripts` from custom_d_fine repo.
+3. Run `preprocess` and `split` scripts from custom_d_fine repo.
 4. Run `train` script, changing confurations, iterating, untill you get desired results.
 5. Run `export`script to create ONNX, TensorRT, OpenVINO models.
 
