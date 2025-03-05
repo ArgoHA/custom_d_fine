@@ -172,5 +172,5 @@ def load_tuning_state(model, path: str):
         stat, infos = matched_state(model.state_dict(), pretrain_state_dict)
 
     model.load_state_dict(stat, strict=False)
-    logger.info(f"Load model.state_dict, {infos}")
+    logger.info(f"Pretrained weigts from {path}, {infos}")
     return model

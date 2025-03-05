@@ -99,6 +99,7 @@ class Trainer:
             cfg.model_name,
             num_labels,
             cfg.train.device,
+            img_size=cfg.train.img_size,
             pretrained_model_path=cfg.train.pretrained_model_path,
         )
 
@@ -112,16 +113,27 @@ class Trainer:
         self.optimizer = build_optimizer(
             self.model,
             lr=cfg.train.base_lr,
+            backbone_lr=cfg.train.backbone_lr,
             betas=cfg.train.betas,
             weight_decay=cfg.train.weight_decay,
             base_lr=cfg.train.base_lr,
         )
+
+        max_lr = cfg.train.base_lr * 2
+        if cfg.model_name in ["l", "x"]:  # per group max lr for big models
+            max_lr = [
+                cfg.train.backbone_lr * 2,
+                cfg.train.backbone_lr * 2,
+                cfg.train.base_lr * 2,
+                cfg.train.base_lr * 2,
+            ]
         self.scheduler = OneCycleLR(
             self.optimizer,
-            max_lr=cfg.train.max_lr,
+            max_lr=max_lr,
             epochs=cfg.train.epochs,
             steps_per_epoch=len(self.train_loader) // self.b_accum_steps,
             pct_start=cfg.train.cycler_pct_start,
+            cycle_momentum=False,
         )
 
         if self.amp_enabled:
@@ -336,7 +348,7 @@ class Trainer:
                         for t in targets
                     ]
 
-                    lr = self.optimizer.param_groups[0]["lr"]
+                    lr = self.optimizer.param_groups[-1]["lr"]
 
                     if self.amp_enabled:
                         with autocast(self.device, cache_enabled=True):
@@ -414,7 +426,9 @@ def main(cfg: DictConfig) -> None:
         logger.error(e)
     finally:
         logger.info("Evaluating best model...")
-        model = build_model(cfg.model_name, num_labels, cfg.train.device)
+        model = build_model(
+            cfg.model_name, num_labels, cfg.train.device, img_size=cfg.train.img_size
+        )
         model.load_state_dict(
             torch.load(Path(cfg.train.path_to_save) / "model.pt", weights_only=True)
         )
@@ -430,6 +444,7 @@ def main(cfg: DictConfig) -> None:
             path_to_save=Path(cfg.train.path_to_save),
             mode="val",
         )
+        wandb_logger(None, val_metrics, epoch=cfg.train.epochs + 1, mode="val")
 
         test_metrics = {}
         if trainer.test_loader:

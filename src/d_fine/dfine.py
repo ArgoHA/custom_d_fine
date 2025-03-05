@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import torch.nn as nn
 import torch.optim as optim
 
@@ -46,8 +47,11 @@ class DFINE(nn.Module):
         return self
 
 
-def build_model(model_name, num_classes, device, pretrained_model_path=None):
+def build_model(model_name, num_classes, device, img_size=None, pretrained_model_path=None):
     model_cfg = models[model_name]
+    model_cfg["HybridEncoder"]["eval_spatial_size"] = img_size
+    model_cfg["DFINETransformer"]["eval_spatial_size"] = img_size
+
     backbone = HGNetv2(**model_cfg["HGNetv2"])
     encoder = HybridEncoder(**model_cfg["HybridEncoder"])
     decoder = DFINETransformer(num_classes=num_classes, **model_cfg["DFINETransformer"])
@@ -68,7 +72,7 @@ def build_loss(model_name, num_classes):
     return loss_fn
 
 
-def build_optimizer(model, lr, betas, weight_decay, base_lr):
+def build_optimizer(model, lr, backbone_lr, betas, weight_decay, base_lr):
     backbone_exclude_norm = []
     backbone_norm = []
     encdec_norm_bias = []
@@ -93,12 +97,12 @@ def build_optimizer(model, lr, betas, weight_decay, base_lr):
         else:
             rest.append(param)
 
-    group1 = {"params": backbone_exclude_norm, "lr": base_lr / 10, "initial_lr": base_lr / 10}
+    group1 = {"params": backbone_exclude_norm, "lr": backbone_lr, "initial_lr": backbone_lr}
     group2 = {
         "params": backbone_norm,
-        "lr": base_lr / 10,
+        "lr": backbone_lr,
         "weight_decay": 0.0,
-        "initial_lr": base_lr / 10,
+        "initial_lr": backbone_lr,
     }
     group3 = {"params": encdec_norm_bias, "weight_decay": 0.0, "lr": base_lr, "initial_lr": base_lr}
     group4 = {"params": rest, "lr": base_lr, "initial_lr": base_lr}
