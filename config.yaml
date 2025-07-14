@@ -8,12 +8,11 @@ model_name: x # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/tjw/20250422-套环颜色检测识别系统 # project root with dataset and outputs
+  root: /home/project_root # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
   pretrained_model_path: ${train.root}/code/CD-FINE/pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
   
-  # data_path: ${train.root}/data/料盘数据集 # path to dataset
-  data_path: ${train.root}/data/套环颜色数据集
+  data_path: ${train.root}/data/path_to_dataset
   path_to_test_data: ${train.root}/VisDrone2019-DET-test-dev/images  # path to test set, used in infer script
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
@@ -24,52 +23,18 @@ train:
 
   ### Configs ###
   device: cuda
-  label_to_name: # dataset's classes
-    # 0: circle
+  label_to_name: # dataset's classes  
+    0: pedestrian
+    1: people
+    2: bicycle
+    3: car
+    4: van
+    5: truck
+    6: tricycle
+    7: awning-tricycle
+    8: bus
+    9: motor
     
-    # 0: pedestrian
-    # 1: people
-    # 2: bicycle
-    # 3: car
-    # 4: van
-    # 5: truck
-    # 6: tricycle
-    # 7: awning-tricycle
-    # 8: bus
-    # 9: motor
-    
-    0: 10G
-    1: 21L
-    2: 冻黄色
-    3: 咖啡色
-    4: 土黄色
-    5: 墨绿色
-    6: 大红色
-    7: 天蓝色
-    8: 帝王绿
-    9: 料盒50-01
-    10: 料盒50-11
-    11: 柑红色
-    12: 桃红色
-    13: 棕红色
-    14: 淡梨色
-    15: 深蓝色
-    16: 湖蓝色
-    17: 灰色
-    18: 白色
-    19: 粉红色
-    20: 紫色
-    21: 纯黄色
-    22: 缺料
-    23: 苹果绿
-    24: 酱红色
-    25: 钛灰色
-    26: 钻头倒插
-    27: 钻头正插
-    28: 银灰色
-    29: 青色
-    30: 青莲色
-    31: 黑色
   use_one_class: False
 
   use_wandb: False # wandb config
