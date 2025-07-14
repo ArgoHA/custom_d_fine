@@ -18,9 +18,11 @@ def split(
 ) -> None:
     test_split = 1 - train_split - val_split
     if test_split <= 0.001:
-        test_split = 0
+        test_split = 0.0
 
-    img_paths = [x.name for x in images_path.iterdir() if not str(x.name).startswith(".")]
+    img_paths = [x.name for x in images_path.iterdir() 
+                 if not str(x.name).startswith(".") 
+                    and x.suffix.lower() == ".jpg"]
 
     if not shuffle:
         img_paths.sort()
@@ -31,30 +33,42 @@ def split(
                 img_paths.remove(img_path)
 
     indices = np.arange(len(img_paths))
-    train_idxs, temp_idxs = train_test_split(
-        indices, test_size=(1 - train_split), random_state=seed, shuffle=shuffle
-    )
 
-    if test_split:
-        test_idxs, val_idxs = train_test_split(
-            temp_idxs,
-            test_size=(val_split / (val_split + test_split)),
-            random_state=seed,
-            shuffle=shuffle,
-        )
+    if train_split >= 1.0:
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+        train_idxs = indices
+        val_idxs = []
     else:
-        val_idxs = temp_idxs
-        test_idxs = []
+        train_idxs, temp_idxs = train_test_split(
+            indices, test_size=(1 - train_split), random_state=seed, shuffle=shuffle
+        )
+
+        if test_split:
+            test_idxs, val_idxs = train_test_split(
+                temp_idxs,
+                test_size=(val_split / (val_split + test_split)),
+                random_state=seed,
+                shuffle=shuffle,
+            )
+        else:
+            val_idxs = temp_idxs
+            test_idxs = []
 
     splits = {"train": train_idxs, "val": val_idxs}
     if test_split:
         splits["test"] = test_idxs
 
     for split_name, split in splits.items():
-        with open(data_path / f"{split_name}.csv", "w") as f:
-            for num, idx in enumerate(split):
-                f.write(str(img_paths[idx]) + "\n")
-            logger.info(f"{split_name}: {num + 1}")
+        csv_path = data_path / f"{split_name}.csv"
+        if csv_path.exists():
+            csv_path.unlink()
+            logger.info(f"{csv_path} already exists. Removing...")
+        if len(split) > 0:
+            with open(csv_path, "w") as f:
+                for idx in split:
+                    f.write(str(img_paths[idx]) + "\n")
+                logger.info(f"{split_name}: {len(split)} were saved to {csv_path}")
 
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")

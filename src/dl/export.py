@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 import hydra
@@ -11,11 +12,43 @@ from omegaconf import DictConfig
 from onnxconverter_common import float16
 from torch import nn
 
+import sys
+
+project_root = "path_to_your_project"
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from src.d_fine.dfine import build_model
 from src.dl.utils import get_latest_experiment_name
+from src.dl.postprocessor import DFINEPostProcessor
 
-INPUT_NAME = "input"
-OUTPUT_NAME = "output"
+
+INPUT_NAMES = ["images", "orig_target_sizes"]
+OUTPUT_NAMES = ["labels", "boxes", "scores"]
+
+
+class CombinedModel(nn.Module):
+    """组合模型和后处理器，匹配参考代码的输入输出格式"""
+    def __init__(self, model, postprocessor):
+        super().__init__()
+        self.model = model
+        self.postprocessor = postprocessor
+
+    def forward(self, images, orig_target_sizes):
+        outputs = self.model(images)
+        processed = self.postprocessor(outputs, orig_target_sizes)
+        
+        # 统一输出格式为 (labels, boxes, scores)
+        if isinstance(processed, tuple) and len(processed) == 3:
+            return processed
+        elif isinstance(processed, list) and all(isinstance(x, dict) for x in processed):
+            # 如果是字典列表格式，转换为元组
+            labels = [x["labels"] for x in processed]
+            boxes = [x["boxes"] for x in processed]
+            scores = [x["scores"] for x in processed]
+            return labels, boxes, scores
+        else:
+            raise ValueError(f"Unsupported postprocessor output format: {type(processed)}")
 
 
 def prepare_model(cfg, device):
@@ -24,7 +57,17 @@ def prepare_model(cfg, device):
     )
     model.load_state_dict(torch.load(Path(cfg.train.path_to_save) / "model.pt", weights_only=True))
     model.eval()
-    return model
+
+    # 创建后处理器实例
+    postprocessor = DFINEPostProcessor(
+        num_classes=len(cfg.train.label_to_name),
+        use_focal_loss=cfg.export.use_focal_loss,
+        num_top_queries=cfg.export.num_top_queries
+    )
+
+    postprocessor = postprocessor.deploy().to(device)
+
+    return CombinedModel(model, postprocessor)
 
 
 def add_suffix(output_path, dynamic_input: bool, half: bool):
@@ -39,28 +82,35 @@ def export_to_onnx(
     model: nn.Module,
     model_path: Path,
     x_test: torch.Tensor,
+    orig_sizes: torch.Tensor,
     max_batch_size: int,
     half: bool,
     dynamic_input: bool,
 ) -> None:
-    dynamic_axes = {}
-    if max_batch_size > 1:
-        dynamic_axes = {INPUT_NAME: {0: "batch_size"}, OUTPUT_NAME: {0: "batch_size"}}
+    
+    # 更新动态轴设置
+    dynamic_axes = {
+        "images": {0: "batch_size"},
+        "orig_target_sizes": {0: "batch_size"},
+        "labels": {0: "batch_size"},
+        "boxes": {0: "batch_size"},
+        "scores": {0: "batch_size"},
+    }
+
     if dynamic_input:
-        if INPUT_NAME not in dynamic_axes:
-            dynamic_axes[INPUT_NAME] = {}
-        dynamic_axes[INPUT_NAME].update({2: "height", 3: "width"})
+        dynamic_axes["images"].update({2: "height", 3: "width"})
 
     output_path = add_suffix(
         model_path.parent / model_path.stem, dynamic_input=dynamic_input, half=half
     )
+
     torch.onnx.export(
         model,
-        x_test,
+        (x_test, orig_sizes),
         output_path,
         opset_version=17,
-        input_names=[INPUT_NAME],
-        output_names=[OUTPUT_NAME],
+        input_names=INPUT_NAMES,
+        output_names=OUTPUT_NAMES,
         dynamic_axes=dynamic_axes,
     )
 
@@ -79,20 +129,29 @@ def export_to_onnx(
         return output_path
 
 
-def export_to_openvino(onnx_path: Path, x_test, dynamic_input: bool, max_batch_size: int) -> None:
+def export_to_openvino(onnx_path: Path, x_test, orig_sizes, dynamic_input: bool, max_batch_size: int) -> None:
     if not dynamic_input and max_batch_size <= 1:
         inp = None
     elif max_batch_size > 1 and dynamic_input:
-        inp = [-1, 3, -1, -1]
+        inp = {
+            "images": [-1, 3, -1, -1],
+            "orig_target_sizes": [-1, 2]
+        }
     elif max_batch_size > 1:
-        inp = [-1, *x_test.shape[1:]]
+        inp = {
+            "images": [-1, *x_test.shape[1:]],
+            "orig_target_sizes": [-1, 2]
+        }
     elif dynamic_input:
-        inp = [1, 3, -1, -1]
+        inp = {
+            "images": [1, 3, -1, -1],
+            "orig_target_sizes": [1, 2]
+        }
 
     model = ov.convert_model(
         input_model=str(onnx_path),
         input=inp,
-        example_input=x_test,
+        example_input={"images": x_test, "orig_target_sizes": orig_sizes},
     )
     ov.serialize(model, str(onnx_path.with_suffix(".xml")), str(onnx_path.with_suffix(".bin")))
     logger.info("OpenVINO model exported")
@@ -148,45 +207,61 @@ def main(cfg: DictConfig):
 
     model = prepare_model(cfg, device)
     x_test = torch.randn(cfg.export.max_batch_size, 3, *cfg.train.img_size).to(device)
-    _ = model(x_test)
+    
+    # 创建orig_target_sizes张量 (N, 2)
+    orig_sizes = torch.tensor([cfg.train.img_size] * cfg.export.max_batch_size, 
+                              dtype=torch.int64).to(device)
 
-    # onnx version
-    export_to_onnx(
-        model,
-        model_path,
-        x_test,
-        cfg.export.max_batch_size,
-        half=cfg.export.half,
-        dynamic_input=cfg.export.dynamic_input,
-    )
+    with torch.inference_mode():
+        _ = model(x_test, orig_sizes)
 
-    # onnx for openvino
-    onnx_path = export_to_onnx(
-        model,
-        model_path,
-        x_test,
-        cfg.export.max_batch_size,
-        half=False,
-        dynamic_input=cfg.export.dynamic_input,
-    )
-    export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
+    export_types = getattr(cfg.export, "types", ["onnx", "openvino", "tensorrt"])
 
-    # onnx for tensorrt
-    static_onnx_path = export_to_onnx(
-        model,
-        model_path,
-        x_test,
-        cfg.export.max_batch_size,
-        False,
-        False,
-    )
-    export_to_tensorrt(
-        static_onnx_path,
-        cfg.export.half,
-        cfg.export.max_batch_size,
-    )
+    if "onnx" in export_types:
+        # onnx version
+        export_to_onnx(
+            model,
+            model_path,
+            x_test,
+            orig_sizes,
+            cfg.export.max_batch_size,
+            half=cfg.export.half,
+            dynamic_input=cfg.export.dynamic_input,
+        )
+        logger.info("ONNX model exported")
 
-    logger.info(f"Exports saved to: {model_path.parent}")
+    if "openvino" in export_types:
+        # onnx for openvino
+        onnx_path = export_to_onnx(
+            model,
+            model_path,
+            x_test,
+            orig_sizes,
+            cfg.export.max_batch_size,
+            half=False,
+            dynamic_input=cfg.export.dynamic_input,
+        )
+        export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
+        logger.info("OpenVINO model exported")
+
+    if "tensorrt" in export_types:
+        # onnx for tensorrt
+        static_onnx_path = export_to_onnx(
+            model,
+            model_path,
+            x_test,
+            cfg.export.max_batch_size,
+            False,
+            False,
+        )
+        export_to_tensorrt(
+            static_onnx_path,
+            cfg.export.half,
+            cfg.export.max_batch_size,
+        )
+        logger.info("TensorRT model exported")
+
+    logger.info(f"Exports are saved to: {model_path.parent}")
 
 
 if __name__ == "__main__":

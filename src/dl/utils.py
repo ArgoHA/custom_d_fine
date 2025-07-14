@@ -16,6 +16,8 @@ import wandb
 from loguru import logger
 from tabulate import tabulate
 
+from PIL import Image, ImageDraw, ImageFont
+
 
 def set_seeds(seed: int, cudnn_fixed: bool = False) -> None:
     torch.manual_seed(seed)
@@ -67,13 +69,13 @@ def log_metrics_locally(
         metrics_df.to_csv(path_to_save / "metrics.csv")
 
 
-def save_metrics(train_metrics, metrics, loss, epoch, path_to_save, use_wandb) -> None:
+def save_metrics(train_metrics, val_metrics, loss, epoch, path_to_save, use_wandb) -> None:
     log_metrics_locally(
-        all_metrics={"train": train_metrics, "val": metrics}, path_to_save=path_to_save, epoch=epoch
+        all_metrics={"train": train_metrics, "val": val_metrics}, path_to_save=path_to_save, epoch=epoch
     )
     if use_wandb:
         wandb_logger(loss, train_metrics, epoch, mode="train")
-        wandb_logger(None, metrics, epoch, mode="val")
+        wandb_logger(None, val_metrics, epoch, mode="val")
 
 
 def calculate_remaining_time(
@@ -97,28 +99,11 @@ def calculate_remaining_time(
 def get_vram_usage():
     try:
         output = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.used,memory.total",
-                "--format=csv,nounits,noheader",
-            ],
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,nounits,noheader"],
             encoding="utf-8",
         )
-
-        # Split lines to handle multiple GPUs correctly
-        lines = output.strip().split("\n")
-        total_usage = []
-
-        for line in lines:
-            try:
-                used, total = map(float, line.split(", "))
-                total_usage.append((used / total) * 100)
-            except ValueError:
-                print(f"Skipping malformed line: {line}")
-
-        # If there are multiple GPUs, return the max usage percentage
-        return round(max(total_usage)) if total_usage else 0
-
+        used, total = map(float, output.strip().split(", "))
+        return round((used / total) * 100)
     except Exception as e:
         print(f"Error running nvidia-smi: {e}")
         return 0
@@ -325,15 +310,60 @@ def vis_one_box(img, box, label, mode, label_to_name, score=None):
         color=color,
         thickness=2,
     )
-    cv2.putText(
-        img,
-        f"{prefix}{label_to_name[int(label)]}{postfix}",
-        (x1, max(0, y1 - 5)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        color,
-        thickness=2,
-    )
+
+    display_text = f"{prefix}{label_to_name[int(label)]}{postfix}"
+
+    try:
+        img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(img_pil)
+        
+        img_height = img.shape[0]
+        font_size = max(20, int(img_height * 0.02))
+        try:
+            font = ImageFont.truetype("./STKAITI.TTF", font_size)
+        except:
+            font = ImageFont.load_default()
+            font.size = font_size
+        
+        text_bbox = font.getbbox(display_text)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+
+        padding_x = max(20, int(text_width * 0.05))
+        padding_y = max(20, int(text_height * 0.2))
+        
+        bg_x1 = x1
+        bg_y1 = max(0, y1 - text_height - 2 * padding_y - 2)
+        bg_x2 = bg_x1 + text_width + 2 * padding_x
+        bg_y2 = bg_y1 + text_height + 2* padding_y
+
+        draw.rectangle(
+            [(bg_x1, bg_y1), (bg_x2, bg_y2)],
+            fill=color
+        )
+        
+        text_x = bg_x1 + padding_x
+        text_y = bg_y1 + padding_y / 2
+
+        draw.text(
+            (text_x, text_y),
+            display_text,
+            fill=(255, 255, 255),
+            font=font
+        )
+        
+        img[:] = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    
+    except Exception as e:
+        cv2.putText(
+            img,
+            display_text,
+            (x1, max(0, y1 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            thickness=2,
+        )
 
 
 def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):

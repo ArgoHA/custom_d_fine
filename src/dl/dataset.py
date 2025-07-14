@@ -2,7 +2,10 @@ import random
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import os
 import albumentations as A
+os.environ["ALBUMENTATIONS_DISABLE_VERSION_CHECK"] = "1"
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -389,6 +392,16 @@ class Loader:
             mode="train",
             cfg=self.cfg,
         )
+
+        train4metric_ds = CustomDataset(
+            self.img_size,
+            self.root_path,
+            self.splits["train"],
+            self.debug_img_processing,
+            mode="val",
+            cfg=self.cfg,
+        )
+
         val_ds = CustomDataset(
             self.img_size,
             self.root_path,
@@ -399,6 +412,7 @@ class Loader:
         )
 
         train_loader = self._build_dataloader_impl(train_ds, shuffle=True)
+        train4metric_loader = self._build_dataloader_impl(train4metric_ds, shuffle=False)
         val_loader = self._build_dataloader_impl(val_ds)
 
         test_loader = None
@@ -420,7 +434,7 @@ class Loader:
             f"Objects count: {', '.join(f'{key}: {value}' for key, value in obj_stats.items())}"
         )
         logger.info(f"Background images: {self._get_amount_of_background()}")
-        return train_loader, val_loader, test_loader
+        return train_loader, train4metric_loader, val_loader, test_loader
 
     def _collate_fn(self, batch) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         """

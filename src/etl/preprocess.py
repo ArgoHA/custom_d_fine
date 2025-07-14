@@ -57,14 +57,42 @@ def convert_images_to_jpg(dir_path: Path, num_threads: int) -> None:
 
 
 def remove_empty_labels(dir_path: Path) -> None:
-    labels = [f.name for f in (dir_path.parent / "labels").iterdir() if not f.name.startswith(".")]
+    label_dir = dir_path.parent / "labels"
+    no_label_dir = label_dir / "noimages"
+    no_label_dir.mkdir(exist_ok=True)  # 确保目标目录存在
+
+    labels = [f.name for f in label_dir.iterdir() if not f.name.startswith(".")]
     counter = 0
     for label in labels:
-        if not ((dir_path.parent / "labels") / label).stat().st_size:
-            (dir_path.parent / "labels" / label).unlink()
+        label_file = label_dir / label
+        if not label_file.stat().st_size:
+            target_path = no_label_dir / label_file.name
+            label_file.rename(target_path)
             counter += 1
-    if counter:
-        logger.info(f"Removed {counter} empty labels")
+
+    logger.info(f"Moved {counter} labels without images to {no_label_dir} floder")
+
+
+def remove_images_without_labels(dir_path: Path) -> None:
+    """
+    将没有对应标签文件的图像移动到 ./nolabels 目录。
+    :param dir_path: 图像目录路径（如 images/train 或 images/val）
+    """
+    label_dir = dir_path.parent / "labels"
+    no_label_dir = dir_path / "nolabels"
+    no_label_dir.mkdir(exist_ok=True)  # 确保目标目录存在
+
+    image_files = [f for f in dir_path.iterdir() if f.suffix.lower() in ('.jpg', '.jpeg', '.png')]
+
+    counter = 0
+    for image_file in image_files:
+        label_file = label_dir / f"{image_file.stem}.txt"
+        if not label_file.exists() or label_file.stat().st_size == 0:
+            target_path = no_label_dir / image_file.name
+            image_file.rename(target_path)
+            counter += 1
+    
+    logger.info(f"Moved {counter} images without labels to {no_label_dir} floder")
 
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
@@ -74,9 +102,11 @@ def main(cfg: DictConfig) -> None:
         paths["test_path"] = Path(test_path)
     for _, data_path in paths.items():
         if (data_path).exists():
+            # 将图片转换为jpg
             convert_images_to_jpg(data_path, cfg.train.num_workers)
             if (data_path.parent / "labels").exists():
                 remove_empty_labels(data_path)
+                remove_images_without_labels(data_path)
 
 
 if __name__ == "__main__":

@@ -1,17 +1,19 @@
-project_name: vis_drone # for wandb
+
+project_name: CD-FINE # for wandb
 exp_name: baseline # experiment name
 
 exp: ${exp_name}_${now_dir}
 
-model_name: s # model size (n, s, m, l, x)
+model_name: x # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/vis_drone # project root with dataset and outputs
+  root: /home/tjw/20250422-套环颜色检测识别系统 # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
-  pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
-
-  data_path: ${train.root}/data/dataset # path to dataset
+  pretrained_model_path: ${train.root}/code/CD-FINE/pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
+  
+  # data_path: ${train.root}/data/料盘数据集 # path to dataset
+  data_path: ${train.root}/data/套环颜色数据集
   path_to_test_data: ${train.root}/VisDrone2019-DET-test-dev/images  # path to test set, used in infer script
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
@@ -21,24 +23,61 @@ train:
   infer_path: ${train.root}/output/infer
 
   ### Configs ###
-  use_wandb: True
   device: cuda
   label_to_name: # dataset's classes
-    0: pedestrian
-    1: people
-    2: bicycle
-    3: car
-    4: van
-    5: truck
-    6: tricycle
-    7: awning-tricycle
-    8: bus
-    9: motor
+    # 0: circle
+    
+    # 0: pedestrian
+    # 1: people
+    # 2: bicycle
+    # 3: car
+    # 4: van
+    # 5: truck
+    # 6: tricycle
+    # 7: awning-tricycle
+    # 8: bus
+    # 9: motor
+    
+    0: 10G
+    1: 21L
+    2: 冻黄色
+    3: 咖啡色
+    4: 土黄色
+    5: 墨绿色
+    6: 大红色
+    7: 天蓝色
+    8: 帝王绿
+    9: 料盒50-01
+    10: 料盒50-11
+    11: 柑红色
+    12: 桃红色
+    13: 棕红色
+    14: 淡梨色
+    15: 深蓝色
+    16: 湖蓝色
+    17: 灰色
+    18: 白色
+    19: 粉红色
+    20: 紫色
+    21: 纯黄色
+    22: 缺料
+    23: 苹果绿
+    24: 酱红色
+    25: 钛灰色
+    26: 钻头倒插
+    27: 钻头正插
+    28: 银灰色
+    29: 青色
+    30: 青莲色
+    31: 黑色
   use_one_class: False
+
+  use_wandb: False # wandb config
 
   img_size: [640, 640] # (h, w)
   keep_ratio: False # image aspect ratio, if True - image will be padded
-  to_visualize_eval: True # save images with gt and preds
+  to_visualize_eval: True # save images with gt and preds, maxium max_visualize_images iamges.
+  max_visualize_images: 3
   debug_img_processing: True # save images after preprocessing
 
   amp_enabled: True # use automatic mixed precision
@@ -46,10 +85,10 @@ train:
 
   batch_size: 8 # physical, should fit on the device
   b_accum_steps: 1 # grad accumulation (n * bs)
-  epochs: 55
+  epochs: 1
   early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
-  num_workers: 12
+  num_workers: 4
 
   ### Validation ###
   conf_thresh: 0.5
@@ -116,14 +155,17 @@ train:
 split:
   ignore_negatives: False # only use images with labels
   shuffle: True
-  train_split: 0.85
-  val_split: 0.15 # test_split = 1 - train_split - val_split
+  train_split: 1.0
+  val_split: 0.0 # test_split = 1 - train_split - val_split
 
 
 export: # TensorRT must be done on the inference device
+  types: ["onnx",]
   half: False # torch, tensorrt
   max_batch_size: 1 # torch, tensorrt
   dynamic_input: False # torch, openvino cpu only
+  use_focal_loss: True
+  num_top_queries: 300
 
 
 infer:
