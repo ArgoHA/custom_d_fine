@@ -28,10 +28,11 @@ def figure_input_type(folder_path: Path):
     return data_type
 
 
-def visualize(img, boxes, labels, scores, output_path, img_path, label_to_name):
+def visualize(img, boxes, labels, scores, output_path, img_path, label_to_name, font_path):
     output_path.mkdir(parents=True, exist_ok=True)
     for box, label, score in zip(boxes, labels, scores):
-        vis_one_box(img, box, label, mode="pred", label_to_name=label_to_name, score=score)
+        vis_one_box(img, box, label, mode="pred", label_to_name=label_to_name, 
+                    font_path=font_path, score=score)
     if len(boxes):
         cv2.imwrite((str(f"{output_path / Path(img_path).stem}.jpg")), img)
 

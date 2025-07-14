@@ -84,6 +84,8 @@ class Trainer:
         self.batch_size = cfg.train.batch_size
         self.num_workers = cfg.train.num_workers
 
+        self.font_path = cfg.font_path
+
         self.max_visualize_images = cfg.train.max_visualize_images
         self.debug_img_processing = cfg.train.debug_img_processing
 
@@ -301,6 +303,7 @@ class Trainer:
                     filter_preds(preds, self.conf_thresh),
                     dataset_path=Path(self.cfg.train.data_path) / "images",
                     path_to_save=self.eval_preds_path,
+                    font_path=self.font_path,
                     label_to_name=self.label_to_name,
                 )
                 visualized_count += batch_visualize

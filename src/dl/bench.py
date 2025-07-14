@@ -62,9 +62,10 @@ def visualize(
     output_path,
     img_path,
     label_to_name,
+    font_path,
 ):
     for gt_box, gt_label in zip(gt_boxes, gt_labels):
-        vis_one_box(img, gt_box, gt_label, mode="gt", label_to_name=label_to_name)
+        vis_one_box(img, gt_box, gt_label, mode="gt", label_to_name=label_to_name, font_path=font_path)
 
     for pred_box, pred_label, score in zip(pred_boxes, pred_labels, pred_scores):
         vis_one_box(
@@ -73,6 +74,7 @@ def visualize(
             pred_label,
             mode="pred",
             label_to_name=label_to_name,
+            font_path=font_path,
             score=score,
         )
 

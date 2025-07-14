@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
-import albumentations as A
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -292,7 +292,7 @@ def filter_preds(preds, conf_thresh):
     return preds
 
 
-def vis_one_box(img, box, label, mode, label_to_name, score=None):
+def vis_one_box(img, box, label, mode, label_to_name, font_path, score=None):
     if mode == "gt":
         prefix = "GT: "
         color = (46, 153, 60)
@@ -320,7 +320,7 @@ def vis_one_box(img, box, label, mode, label_to_name, score=None):
         img_height = img.shape[0]
         font_size = max(20, int(img_height * 0.02))
         try:
-            font = ImageFont.truetype("./STKAITI.TTF", font_size)
+            font = ImageFont.truetype(font_path, font_size)
         except:
             font = ImageFont.load_default()
             font.size = font_size
@@ -366,7 +366,7 @@ def vis_one_box(img, box, label, mode, label_to_name, score=None):
         )
 
 
-def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
+def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name, font_path):
     """
     Saves images with drawn bounding boxes.
       - Green bboxes for GT
@@ -380,7 +380,7 @@ def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
         # Draw ground-truth boxes (green)
         for box, label in zip(gt_dict["boxes"], gt_dict["labels"]):
             # box: [x1, y1, x2, y2]
-            vis_one_box(img, box, label, mode="gt", label_to_name=label_to_name)
+            vis_one_box(img, box, label, mode="gt", label_to_name=label_to_name, font_path=font_path)
 
         # Draw predicted boxes (blue)
         for box, label, score in zip(pred_dict["boxes"], pred_dict["labels"], pred_dict["scores"]):
@@ -390,6 +390,7 @@ def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
                 label,
                 mode="pred",
                 label_to_name=label_to_name,
+                font_path=font_path,
                 score=score,
             )
 

@@ -37,6 +37,7 @@ class CustomDataset(Dataset):
     ) -> None:
         self.project_path = Path(cfg.train.root)
         self.root_path = root_path
+        self.font_path = cfg.font_path
         self.split = split
         self.target_h, self.target_w = img_size
         self.norm = ([0, 0, 0], [1, 1, 1])
@@ -146,7 +147,7 @@ class CustomDataset(Dataset):
         boxes_np = boxes.cpu().numpy().astype(int)
         classes_np = classes.cpu().numpy()
         for box, class_id in zip(boxes_np, classes_np):
-            vis_one_box(image_np, box, class_id, mode="gt", label_to_name=self.label_to_name)
+            vis_one_box(image_np, box, class_id, mode="gt", label_to_name=self.label_to_name, font_path=self.font_path)
 
         # Save the image
         save_dir = self.debug_img_path / self.mode

@@ -151,4 +151,6 @@ hydra:
   run:
     dir: .
 
+font_path: path_to_Chinese_font
+
 now_dir: &nowdir ${now:%Y-%m-%d}
