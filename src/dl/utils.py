@@ -5,7 +5,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import cv2
 import numpy as np
@@ -176,7 +176,7 @@ def norm_xywh_to_abs_xyxy(boxes: np.ndarray, h: int, w: int, clip=True):
 
 def abs_xyxy_to_norm_xywh(boxes: np.ndarray, h: int, w: int):
     """
-    Absolute (x1, y1, x2, y2)  →  normalised (x_c, y_c, w, h)
+    Absolute (x1, y1, x2, y2) -> normalised (x_c, y_c, w, h)
     """
     x1, y1, x2, y2 = boxes.T
     x_c = (x1 + x2) / 2 / w
@@ -258,49 +258,113 @@ def get_transform_matrix(img_shape, new_shape, degrees, scale, shear, translate)
     return M, s
 
 
+# def random_affine(img, targets, segments, target_size, degrees, translate, scales, shear):
+#     M, scale = get_transform_matrix(img.shape[:2], target_size, degrees, scales, shear, translate)
+
+#     if (M != np.eye(3)).any():  # image changed
+#         img = cv2.warpAffine(img, M[:2], dsize=target_size, borderValue=(114, 114, 114))
+
+#     # Transform label coordinates
+#     n = len(targets)
+#     if (n and len(segments) == 0) or (len(segments) != len(targets)):
+#         new = np.zeros((n, 4))
+
+#         xy = np.ones((n * 4, 3))
+#         xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
+#         xy = xy @ M.T  # transform
+#         xy = xy[:, :2].reshape(n, 8)  # perspective rescale or affine
+
+#         # create new boxes
+#         x = xy[:, [0, 2, 4, 6]]
+#         y = xy[:, [1, 3, 5, 7]]
+#         new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
+
+#         # clip
+#         new[:, [0, 2]] = new[:, [0, 2]].clip(0, target_size[0])
+#         new[:, [1, 3]] = new[:, [1, 3]].clip(0, target_size[1])
+
+#     else:
+#         segments = resample_segments(segments)  # upsample
+#         new = np.zeros((len(targets), 4))
+#         assert len(segments) <= len(targets)
+#         for i, segment in enumerate(segments):
+#             xy = np.ones((len(segment), 3))
+#             xy[:, :2] = segment
+#             xy = xy @ M.T  # transform
+#             xy = xy[:, :2]  # perspective rescale or affine
+#             # clip
+#             new[i] = segment2box(xy, target_size[0], target_size[1])
+
+#     # filter candidates
+#     i = box_candidates(box1=targets[:, 1:5].T * scale, box2=new.T, area_thr=0.1)
+#     targets = targets[i]
+#     targets[:, 1:5] = new[i]
+
+#     return img, targets
+
+
 def random_affine(img, targets, segments, target_size, degrees, translate, scales, shear):
+    """
+    Args:
+      img: (Hbig, Wbig, 3)
+      targets: (N, 5) -> [cls, x1, y1, x2, y2] ABS on the mosaic canvas
+      segments: list[np.ndarray] of length N; each (K,2) ABS polygon on the mosaic canvas
+                If an object comes from bbox-only annotation, pass an empty array for it.
+    Returns:
+      img_aff: final (target_h, target_w, 3)
+      targets_aff: (M, 5) filtered + transformed
+      segments_aff: list[np.ndarray] length=M, transformed polygons
+    """
     M, scale = get_transform_matrix(img.shape[:2], target_size, degrees, scales, shear, translate)
 
-    if (M != np.eye(3)).any():  # image changed
+    # warp image
+    if (M != np.eye(3)).any():
         img = cv2.warpAffine(img, M[:2], dsize=target_size, borderValue=(114, 114, 114))
 
-    # Transform label coordinates
     n = len(targets)
-    if (n and len(segments) == 0) or (len(segments) != len(targets)):
-        new = np.zeros((n, 4))
+    if n:
+        # transform boxes by corners
+        xy = np.ones((n * 4, 3), dtype=np.float32)
+        xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)
+        xy = xy @ M.T
+        xy = xy[:, :2].reshape(n, 8)
 
-        xy = np.ones((n * 4, 3))
-        xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
-        xy = xy @ M.T  # transform
-        xy = xy[:, :2].reshape(n, 8)  # perspective rescale or affine
-
-        # create new boxes
         x = xy[:, [0, 2, 4, 6]]
         y = xy[:, [1, 3, 5, 7]]
-        new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
+        new = np.stack([x.min(1), y.min(1), x.max(1), y.max(1)], axis=1)
 
-        # clip
+        # clip boxes into target frame
         new[:, [0, 2]] = new[:, [0, 2]].clip(0, target_size[0])
         new[:, [1, 3]] = new[:, [1, 3]].clip(0, target_size[1])
 
+        # transform segments (if provided)
+        segs_out = []
+        if segments is None or len(segments) == 0:
+            segs_out = [np.empty((0, 2), dtype=np.float32) for _ in range(n)]
+        else:
+            # keep 1:1 with targets
+            for s in segments:
+                if s.size == 0:
+                    segs_out.append(np.empty((0, 2), dtype=np.float32))
+                    continue
+                pts = np.concatenate([s, np.ones((len(s), 1), dtype=np.float32)], axis=1)  # (K,3)
+                pts = pts @ M.T
+                pts = pts[:, :2]
+                # clip to frame (optional but helps rasterizer)
+                pts[:, 0] = np.clip(pts[:, 0], 0, target_size[0])
+                pts[:, 1] = np.clip(pts[:, 1], 0, target_size[1])
+                segs_out.append(pts.astype(np.float32))
+
+        # filter candidates and keep segments in sync
+        i = box_candidates(box1=targets[:, 1:5].T * scale, box2=new.T, area_thr=0.1)
+        targets = targets[i]
+        targets[:, 1:5] = new[i]
+        segs_out = [segs_out[k] for k, keep in enumerate(i) if keep]
+
     else:
-        segments = resample_segments(segments)  # upsample
-        new = np.zeros((len(targets), 4))
-        assert len(segments) <= len(targets)
-        for i, segment in enumerate(segments):
-            xy = np.ones((len(segment), 3))
-            xy[:, :2] = segment
-            xy = xy @ M.T  # transform
-            xy = xy[:, :2]  # perspective rescale or affine
-            # clip
-            new[i] = segment2box(xy, target_size[0], target_size[1])
+        segs_out = []
 
-    # filter candidates
-    i = box_candidates(box1=targets[:, 1:5].T * scale, box2=new.T, area_thr=0.1)
-    targets = targets[i]
-    targets[:, 1:5] = new[i]
-
-    return img, targets
+    return img, targets, segs_out
 
 
 def get_mosaic_coordinate(mosaic_image, mosaic_index, xc, yc, w, h, target_h, target_w):
@@ -324,13 +388,119 @@ def get_mosaic_coordinate(mosaic_image, mosaic_index, xc, yc, w, h, target_h, ta
     return (x1, y1, x2, y2), small_coord
 
 
-def filter_preds(preds, conf_thresh):
+# def filter_preds(preds, conf_thresh):
+#     for pred in preds:
+#         keep_idxs = pred["scores"] >= conf_thresh
+#         pred["scores"] = pred["scores"][keep_idxs]
+#         pred["boxes"] = pred["boxes"][keep_idxs]
+#         pred["labels"] = pred["labels"][keep_idxs]
+#     return preds
+
+
+def filter_preds(preds, conf_thresh, mask_source="masks_prob"):
+    """
+    Filters predictions by score AND keeps masks in-sync with the kept indices.
+    - If mask_source == "masks_prob" and present, also populates pred["masks"] as uint8 via conf_thresh.
+    """
     for pred in preds:
-        keep_idxs = pred["scores"] >= conf_thresh
-        pred["scores"] = pred["scores"][keep_idxs]
-        pred["boxes"] = pred["boxes"][keep_idxs]
-        pred["labels"] = pred["labels"][keep_idxs]
+        keep = pred["scores"] >= conf_thresh
+        pred["scores"] = pred["scores"][keep]
+        pred["boxes"] = pred["boxes"][keep]
+        pred["labels"] = pred["labels"][keep]
+
+        # Keep mask tensors aligned with kept queries
+        if (
+            mask_source in pred
+            and pred[mask_source] is not None
+            and getattr(pred[mask_source], "numel", lambda: 0)() > 0
+        ):
+            m = pred[mask_source][keep]
+            pred[mask_source] = m
+            # Ensure binary mask view exists (uint8)
+            if mask_source == "masks_prob":
+                pred["masks"] = (m > conf_thresh).to(torch.uint8)
+        elif (
+            "masks" in pred
+            and pred["masks"] is not None
+            and getattr(pred["masks"], "numel", lambda: 0)() > 0
+        ):
+            pred["masks"] = pred["masks"][keep].to(torch.uint8)
+
     return preds
+
+
+def filter_masks(preds, conf_thresh, mask_source="masks_prob"):
+    for pred in preds:
+        keep = pred["scores"] >= conf_thresh
+
+        # Keep mask tensors aligned with kept queries
+        if (
+            mask_source in pred
+            and pred[mask_source] is not None
+            and getattr(pred[mask_source], "numel", lambda: 0)() > 0
+        ):
+            m = pred[mask_source][keep]
+            pred[mask_source] = m
+            # Ensure binary mask view exists (uint8)
+            if mask_source == "masks_prob":
+                pred["masks"] = (m > conf_thresh).to(torch.uint8)
+        # elif (
+        #     "masks" in pred
+        #     and pred["masks"] is not None
+        #     and getattr(pred["masks"], "numel", lambda: 0)() > 0
+        # ):
+        #     pred["masks"] = pred["masks"][keep].to(torch.uint8)
+
+    return preds
+
+
+def label_color(label: int):
+    # deterministic color per class (BGR for OpenCV)
+    palette = [
+        (255, 56, 56),
+        (255, 159, 56),
+        (255, 255, 56),
+        (56, 255, 56),
+        (56, 255, 255),
+        (56, 56, 255),
+        (255, 56, 255),
+        (180, 130, 70),
+        (204, 153, 255),
+        (80, 175, 76),
+        (42, 157, 143),
+        (233, 196, 106),
+        (244, 162, 97),
+        (231, 111, 81),
+        (69, 123, 157),
+        (29, 53, 87),
+    ]
+    return palette[int(label) % len(palette)]
+
+
+def draw_mask(img: np.ndarray, mask: np.ndarray, color, alpha: float = 0.4, outline: bool = True):
+    """
+    img: BGR uint8 [H,W,3]
+    mask: uint8/bool [H,W] (1=mask)
+    color: (B,G,R)
+    """
+    if mask.dtype != np.uint8:
+        mask = mask.astype(np.uint8)
+
+    if mask.ndim == 3:  # [1,H,W] -> [H,W]
+        mask = mask.squeeze(0)
+
+    if mask.max() == 0:
+        return
+
+    # fast alpha blend on masked pixels
+    m = mask.astype(bool)
+    overlay = np.zeros_like(img, dtype=np.uint8)
+    overlay[:] = color
+    img[m] = cv2.addWeighted(img[m], 1 - alpha, overlay[m], alpha, 0)
+
+    if outline:
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(img, cnts, -1, color, 2)
 
 
 def vis_one_box(img, box, label, mode, label_to_name, score=None):
@@ -362,23 +532,95 @@ def vis_one_box(img, box, label, mode, label_to_name, score=None):
     )
 
 
-def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
+# def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
+#     """
+#     Saves images with drawn bounding boxes.
+#       - Green bboxes for GT
+#       - Blue bboxes for preds
+#     """
+#     path_to_save.mkdir(parents=True, exist_ok=True)
+
+#     for gt_dict, pred_dict, img_path in zip(gt, preds, img_paths):
+#         img = cv2.imread(str(dataset_path / img_path))
+
+#         # Draw ground-truth boxes (green)
+#         for box, label in zip(gt_dict["boxes"], gt_dict["labels"]):
+#             # box: [x1, y1, x2, y2]
+#             vis_one_box(img, box, label, mode="gt", label_to_name=label_to_name)
+
+#         # Draw predicted boxes (blue)
+#         for box, label, score in zip(pred_dict["boxes"], pred_dict["labels"], pred_dict["scores"]):
+#             vis_one_box(
+#                 img,
+#                 box,
+#                 label,
+#                 mode="pred",
+#                 label_to_name=label_to_name,
+#                 score=score,
+#             )
+
+#         # Construct a filename and save
+#         outpath = path_to_save / img_path.name
+#         cv2.imwrite(str(outpath), img)
+
+
+def visualize(
+    img_paths,
+    gt,
+    preds,
+    dataset_path,
+    path_to_save,
+    label_to_name,
+    mask_alpha_gt: float = 0.35,
+    mask_alpha_pred: float = 0.40,
+):
     """
-    Saves images with drawn bounding boxes.
-      - Green bboxes for GT
-      - Blue bboxes for preds
+    Saves images with:
+      - GT: green boxes + optional green masks
+      - Preds: brown boxes + colored masks per class
+    Expects pred dicts possibly containing "masks" (uint8)
     """
     path_to_save.mkdir(parents=True, exist_ok=True)
 
+    draw_gt_masks = "masks" in gt[0]
+    draw_pred_masks = "masks" in preds[0]
+
     for gt_dict, pred_dict, img_path in zip(gt, preds, img_paths):
         img = cv2.imread(str(dataset_path / img_path))
+        if img is None:
+            continue
 
-        # Draw ground-truth boxes (green)
+        # Draw GT masks (green-ish)
+        if (
+            draw_gt_masks
+            and "masks" in gt_dict
+            and gt_dict["masks"] is not None
+            and len(gt_dict["masks"]) > 0
+        ):
+            for m in gt_dict["masks"]:
+                draw_mask(img, m.numpy(), color=(46, 153, 60), alpha=mask_alpha_gt, outline=True)
+
+        # Draw GT boxes (green)
         for box, label in zip(gt_dict["boxes"], gt_dict["labels"]):
-            # box: [x1, y1, x2, y2]
             vis_one_box(img, box, label, mode="gt", label_to_name=label_to_name)
 
-        # Draw predicted boxes (blue)
+        # Prepare predicted masks
+        pred_masks_to_draw = None
+        if draw_pred_masks:
+            if (
+                "masks" in pred_dict
+                and pred_dict["masks"] is not None
+                and len(pred_dict["masks"]) > 0
+            ):
+                pred_masks_to_draw = pred_dict["masks"]
+        # Draw predicted masks (colored by class)
+        if pred_masks_to_draw is not None:
+            pm = pred_masks_to_draw.cpu().numpy()
+            for m, lab in zip(pm, pred_dict["labels"]):
+                color = label_color(int(lab))
+                draw_mask(img, m, color=color, alpha=mask_alpha_pred, outline=True)
+
+        # Draw predicted boxes (blue-ish)
         for box, label, score in zip(pred_dict["boxes"], pred_dict["labels"], pred_dict["scores"]):
             vis_one_box(
                 img,
@@ -389,7 +631,6 @@ def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
                 score=score,
             )
 
-        # Construct a filename and save
         outpath = path_to_save / img_path.name
         cv2.imwrite(str(outpath), img)
 
@@ -483,6 +724,60 @@ def process_boxes(boxes, processed_size, orig_sizes, keep_ratio, device):
                 processed_sizes[i],
             )
     return torch.tensor(final_boxes).to(device)
+
+
+def process_masks(
+    pred_masks,  # Tensor [B, Q, Hm, Wm] or [Q, Hm, Wm]
+    processed_size,  # (H, W) of network input (after your A.Compose)
+    orig_sizes,  # Tensor [B, 2] (H, W)
+    keep_ratio: bool,
+) -> List[torch.Tensor]:
+    """
+    Returns list of length B with masks resized to original image sizes:
+    Each item: Float Tensor [Q, H_orig, W_orig] in [0,1] (no thresholding here).
+    - Handles letterbox padding removal if keep_ratio=True.
+    - Works for both batched and single-image inputs.
+    """
+    single = pred_masks.dim() == 3  # [Q,Hm,Wm]
+    if single:
+        pred_masks = pred_masks.unsqueeze(0)  # -> [1,Q,Hm,Wm]
+
+    B, Q, Hm, Wm = pred_masks.shape
+    device = pred_masks.device
+    dtype = pred_masks.dtype
+
+    # 1) Upsample masks to processed (input) size
+    proc_h, proc_w = int(processed_size[0]), int(processed_size[1])
+    masks_proc = torch.nn.functional.interpolate(
+        pred_masks, size=(proc_h, proc_w), mode="bilinear", align_corners=False
+    )  # [B,Q,Hp,Wp] with Hp=proc_h, Wp=proc_w
+
+    out = []
+    for b in range(B):
+        H0, W0 = int(orig_sizes[b, 0].item()), int(orig_sizes[b, 1].item())
+        m = masks_proc[b]  # [Q, Hp, Wp]
+        if keep_ratio:
+            # Compute same gain/pad as in scale_boxes_ratio_kept
+            gain = min(proc_h / H0, proc_w / W0)
+            padw = round((proc_w - W0 * gain) / 2 - 0.1)
+            padh = round((proc_h - H0 * gain) / 2 - 0.1)
+
+            # Remove padding before final resize
+            y1 = max(padh, 0)
+            y2 = proc_h - max(padh, 0)
+            x1 = max(padw, 0)
+            x2 = proc_w - max(padw, 0)
+            m = m[:, y1:y2, x1:x2]  # [Q, cropped_h, cropped_w]
+
+        # 2) Resize to original size
+        m = torch.nn.functional.interpolate(
+            m.unsqueeze(0), size=(H0, W0), mode="bilinear", align_corners=False
+        ).squeeze(0)  # [Q, H0, W0]
+        out.append(m.clamp_(0, 1).to(device=device, dtype=dtype))
+
+    if single:
+        return [out[0]]
+    return out
 
 
 def get_latest_experiment_name(exp: str, output_dir: str):
@@ -672,3 +967,23 @@ class LetterboxRect(DualTransform):
             b = np.concatenate([b, extra], axis=1)
 
         return b
+
+
+def norm_poly_to_abs(poly_norm_flat: np.ndarray, H: int, W: int) -> np.ndarray:
+    """poly_norm_flat: [x1,y1,x2,y2,...] normalized -> (K,2) absolute"""
+    if poly_norm_flat.size == 0:
+        return np.empty((0, 2), dtype=np.float32)
+    pts = poly_norm_flat.reshape(-1, 2).copy()
+    pts[:, 0] *= W
+    pts[:, 1] *= H
+    return pts.astype(np.float32)
+
+
+def poly_abs_to_mask(poly_abs: np.ndarray, h: int, w: int) -> np.ndarray:
+    # if poly_abs.size < 6:
+    #     return np.zeros((h, w), dtype=np.uint8)
+    pts = poly_abs.copy()
+    pts = np.round(pts).astype(np.int32)
+    m = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(m, [pts], 1)
+    return m

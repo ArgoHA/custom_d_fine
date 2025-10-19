@@ -20,7 +20,11 @@ OUTPUT_NAMES = ["logits", "boxes"]
 
 def prepare_model(cfg, device):
     model = build_model(
-        cfg.model_name, len(cfg.train.label_to_name), device, img_size=cfg.train.img_size
+        cfg.model_name,
+        len(cfg.train.label_to_name),
+        cfg.task == "segment",
+        device,
+        img_size=cfg.train.img_size,
     )
     model.load_state_dict(torch.load(Path(cfg.train.path_to_save) / "model.pt", weights_only=True))
     model.eval()

@@ -80,9 +80,9 @@ class MSDeformableAttention(nn.Module):
         self.method = method
 
         self.head_dim = embed_dim // num_heads
-        assert (
-            self.head_dim * num_heads == self.embed_dim
-        ), "embed_dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == self.embed_dim, (
+            "embed_dim must be divisible by num_heads"
+        )
 
         self.sampling_offsets = nn.Linear(embed_dim, self.total_points * 2)
         self.attention_weights = nn.Linear(embed_dim, self.total_points)
@@ -313,6 +313,83 @@ class LQE(nn.Module):
         return scores + quality_score
 
 
+class PixelDecoder(nn.Module):
+    """
+    Build a ~1/4 scale mask feature from backbone feats.
+    Expects feats[-1] the highest-res (smallest stride) feature.
+    """
+
+    def __init__(self, in_chs, out_ch=256):
+        super().__init__()
+        # Project each level to out_ch, then upsample and fuse to 1/4
+        self.proj = nn.ModuleList([nn.Conv2d(c, out_ch, 1, bias=False) for c in in_chs])
+        self.bn = nn.ModuleList([nn.BatchNorm2d(out_ch) for _ in in_chs])
+        self.smooth = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+
+    def forward(self, feats):
+        # feats: list of [B,C,H_l,W_l] ordered by increasing stride (s8, s16, s32)
+        xs = [bn(p(f)) for f, p, bn in zip(feats, self.proj, self.bn)]
+        # upsample to the highest spatial resolution among inputs (feats[0] if that’s s8)
+        ref_h, ref_w = xs[0].shape[-2:]
+        x = xs[0]
+        for t in xs[1:]:
+            x = x + F.interpolate(t, size=(ref_h, ref_w), mode="bilinear", align_corners=False)
+        x = self.smooth(x)
+        return x  # [B, out_ch, H/stride_min, W/stride_min]
+
+
+class MaskPixelDecoder(nn.Module):
+    """
+    Build a 1/4-scale mask feature from backbone (C2-C5) and (optionally) an 'encoder' map.
+    feats: [C2(s4), C3(s8), C4(s16), C5(s32)]
+    Optional 'enc' is a (B,C,H8,W8) feature akin to Ce (stride 8) which we upsample 2x.
+    """
+
+    def __init__(self, in_chs, out_ch=256, use_enc=True):
+        super().__init__()
+        assert len(in_chs) >= 1 and in_chs[0] is not None, "Need C2 (stride 4) for 1/4 masks"
+        self.use_enc = use_enc
+
+        # 1x1 proj for each backbone level
+        self.lateral = nn.ModuleList([nn.Conv2d(c, out_ch, 1, bias=False) for c in in_chs])
+        self.bn = nn.ModuleList([nn.BatchNorm2d(out_ch) for _ in in_chs])
+
+        # optional encoder projection T(.) to hidden dim (out_ch)
+        if use_enc:
+            self.enc_proj = nn.Conv2d(
+                out_ch, out_ch, 1, bias=False
+            )  # expects enc already in out_ch or hidden_dim
+            self.enc_bn = nn.BatchNorm2d(out_ch)
+
+        # small FPN-ish smoothing stack at 1/4
+        self.smooth1 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.smooth2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, feats, enc_feat_1_8=None):
+        # feats: [C2(s4), C3(s8), C4(s16), C5(s32)]
+        c2 = self.bn[0](self.lateral[0](feats[0]))  # (B, out_ch, H/4, W/4)
+        x = c2
+
+        # fuse upsampled higher strides into s4
+        for i in range(1, len(feats)):
+            t = self.bn[i](self.lateral[i](feats[i]))
+            x = x + F.interpolate(t, size=c2.shape[-2:], mode="bilinear", align_corners=False)
+
+        # add encoder feature (stride 8) upsampled 2× → stride 4
+        if self.use_enc and enc_feat_1_8 is not None:
+            e = self.enc_bn(self.enc_proj(enc_feat_1_8))
+            e = F.interpolate(e, size=c2.shape[-2:], mode="bilinear", align_corners=False)
+            x = x + e
+
+        # a bit more capacity helps mask crispness
+        x = self.act(self.bn1(self.smooth1(x)))
+        x = self.act(self.bn2(self.smooth2(x)))
+        return x  # (B, out_ch, H/4, W/4)
+
+
 class TransformerDecoder(nn.Module):
     """
     Transformer Decoder implementing Fine-grained Distribution Refinement (FDR).
@@ -400,6 +477,7 @@ class TransformerDecoder(nn.Module):
             project = self.project
 
         ref_points_detach = F.sigmoid(ref_points_unact)
+        dec_out_queries = []  # Collect per-layer query features for segmentaiton head
 
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)
@@ -416,7 +494,8 @@ class TransformerDecoder(nn.Module):
 
             output = layer(
                 output, ref_points_input, value, spatial_shapes, attn_mask, query_pos_embed
-            )
+            )  # decoder query embeddings
+            dec_out_queries.append(output)
 
             if i == 0:
                 # Initial bounding box predictions with inverse sigmoid refinement
@@ -453,6 +532,7 @@ class TransformerDecoder(nn.Module):
             torch.stack(dec_out_refs),
             pre_bboxes,
             pre_scores,
+            torch.stack(dec_out_queries),
         )
 
 
@@ -486,6 +566,8 @@ class DFINETransformer(nn.Module):
         reg_max=32,
         reg_scale=4.0,
         layer_scale=1,
+        enable_mask_head=False,
+        mask_dim=256,
     ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -506,6 +588,8 @@ class DFINETransformer(nn.Module):
         self.eval_spatial_size = eval_spatial_size
         self.aux_loss = aux_loss
         self.reg_max = reg_max
+        self.mask_dim = mask_dim
+        self.enable_mask_head = enable_mask_head
 
         assert query_select_method in ("default", "one2many", "agnostic"), ""
         assert cross_attn_method in ("default", "discrete"), ""
@@ -560,6 +644,13 @@ class DFINETransformer(nn.Module):
                 num_classes + 1, hidden_dim, padding_idx=num_classes
             )
             init.normal_(self.denoising_class_embed.weight[:-1])
+
+        # segmentation head
+        if self.enable_mask_head:
+            self.pixel_decoder = MaskPixelDecoder(
+                in_chs=feat_channels, out_ch=self.mask_dim, use_enc=True
+            )
+            self.mask_head = MLP(self.hidden_dim, self.hidden_dim, self.mask_dim, num_layers=3)
 
         # decoder embedding
         self.learn_query_content = learn_query_content
@@ -836,10 +927,31 @@ class DFINETransformer(nn.Module):
 
         return topk_memory, topk_logits, topk_anchors
 
+    def _should_do_masks(self, targets):
+        if not self.enable_mask_head:
+            return False
+        if targets is None:
+            # inference path – allow masks if branch is enabled
+            return True
+        # train path – only if any sample has non-empty masks
+        try:
+            for t in targets:
+                m = t.get("masks", None)
+                if m is not None and hasattr(m, "numel") and m.numel() > 0:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _mask_logits_from_h(self, h, mask_feat):  # h: [B,Q,C]
+        mask_embed = self.mask_head(h)  # [B,Q,Cmask]
+        # einsum: (B,Q,C) x (B,C,H,W) -> (B,Q,H,W)
+        return torch.einsum("bqc,bchw->bqhw", mask_embed, mask_feat)
+
     def forward(self, feats, targets=None):
+        do_masks = self._should_do_masks(targets)
         # input projection and embedding
         memory, spatial_shapes = self._get_encoder_input(feats)
-
         # prepare denoising training
         if self.training and self.num_denoising > 0:
             denoising_logits, denoising_bbox_unact, attn_mask, dn_meta = (
@@ -861,7 +973,7 @@ class DFINETransformer(nn.Module):
         )
 
         # decoder
-        out_bboxes, out_logits, out_corners, out_refs, pre_bboxes, pre_logits = self.decoder(
+        out_bboxes, out_logits, out_corners, out_refs, pre_bboxes, pre_logits, hs = self.decoder(
             init_ref_contents,
             init_ref_points_unact,
             memory,
@@ -875,7 +987,7 @@ class DFINETransformer(nn.Module):
             self.reg_scale,
             attn_mask=attn_mask,
             dn_meta=dn_meta,
-        )
+        )  # hs: [num_layers, B, Q, C]
 
         if self.training and dn_meta is not None:
             dn_pre_logits, pre_logits = torch.split(pre_logits, dn_meta["dn_num_split"], dim=1)
@@ -886,6 +998,23 @@ class DFINETransformer(nn.Module):
             dn_out_corners, out_corners = torch.split(out_corners, dn_meta["dn_num_split"], dim=2)
             dn_out_refs, out_refs = torch.split(out_refs, dn_meta["dn_num_split"], dim=2)
 
+        # segmentation
+        pred_masks = None
+        aux_masks = None
+        B = feats[0].shape[0]
+        C = self.hidden_dim
+        lvl0_h, lvl0_w = spatial_shapes[0]
+        lvl0_len = lvl0_h * lvl0_w
+
+        mem0 = memory[:, :lvl0_len, :]  # (B, H8*W8, C)
+        mem0 = mem0.permute(0, 2, 1).reshape(B, C, lvl0_h, lvl0_w)  # (B,C,H8,W8)
+        if do_masks:
+            mask_feat = self.pixel_decoder(feats, enc_feat_1_8=mem0)
+            pred_masks = self._mask_logits_from_h(hs[-1], mask_feat)  # logits
+            aux_masks = [
+                self._mask_logits_from_h(h, mask_feat) for h in hs[:-1]
+            ]  # list of [B,Q,Hm,Wm]
+
         if self.training:
             out = {
                 "pred_logits": out_logits[-1],
@@ -895,8 +1024,15 @@ class DFINETransformer(nn.Module):
                 "up": self.up,
                 "reg_scale": self.reg_scale,
             }
+            if do_masks:
+                out["pred_masks"] = pred_masks
         else:
-            out = {"pred_logits": out_logits[-1], "pred_boxes": out_bboxes[-1]}
+            out = {
+                "pred_logits": out_logits[-1],
+                "pred_boxes": out_bboxes[-1],
+            }
+            if do_masks:
+                out["pred_masks"] = torch.sigmoid(pred_masks)
 
         if self.training and self.aux_loss:
             out["aux_outputs"] = self._set_aux_loss2(
@@ -906,6 +1042,7 @@ class DFINETransformer(nn.Module):
                 out_refs[:-1],
                 out_corners[-1],
                 out_logits[-1],
+                aux_masks=aux_masks if do_masks else None,
             )
             out["enc_aux_outputs"] = self._set_aux_loss(enc_topk_logits_list, enc_topk_bboxes_list)
             out["pre_outputs"] = {"pred_logits": pre_logits, "pred_boxes": pre_bboxes}
@@ -941,18 +1078,37 @@ class DFINETransformer(nn.Module):
         outputs_ref,
         teacher_corners=None,
         teacher_logits=None,
+        aux_masks=None,
     ):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [
-            {
-                "pred_logits": a,
-                "pred_boxes": b,
-                "pred_corners": c,
-                "ref_points": d,
-                "teacher_corners": teacher_corners,
-                "teacher_logits": teacher_logits,
-            }
-            for a, b, c, d in zip(outputs_class, outputs_coord, outputs_corners, outputs_ref)
-        ]
+        results = []
+        if aux_masks is None:
+            for a, b, c, d in zip(outputs_class, outputs_coord, outputs_corners, outputs_ref):
+                results.append(
+                    {
+                        "pred_logits": a,
+                        "pred_boxes": b,
+                        "pred_corners": c,
+                        "ref_points": d,
+                        "teacher_corners": teacher_corners,
+                        "teacher_logits": teacher_logits,
+                    }
+                )
+        else:
+            for a, b, c, d, m in zip(
+                outputs_class, outputs_coord, outputs_corners, outputs_ref, aux_masks
+            ):
+                results.append(
+                    {
+                        "pred_logits": a,
+                        "pred_boxes": b,
+                        "pred_corners": c,
+                        "ref_points": d,
+                        "teacher_corners": teacher_corners,
+                        "teacher_logits": teacher_logits,
+                        "pred_masks": m,
+                    }
+                )
+        return results

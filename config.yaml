@@ -1,18 +1,19 @@
-project_name: vis_drone # for wandb
-exp_name: baseline # experiment name
+project_name: ins_seg # for wandb
+exp_name: deafault_n # experiment name
 
 exp: ${exp_name}_${now_dir}
 
 model_name: s # model size (n, s, m, l, x)
+task: segment # detect/segment
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/vis_drone # project root with dataset and outputs
+  root: /home/argo/Desktop/Projects/deep_learning/random/cracks # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
   pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
   data_path: ${train.root}/data/dataset # path to dataset
-  path_to_test_data: ${train.root}/VisDrone2019-DET-test-dev/images  # path to test set, used in infer script
+  path_to_test_data: ${train.root}/data/test  # path to test set, used in infer script
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
   debug_img_path: ${train.root}/output/debug_images
@@ -24,16 +25,8 @@ train:
   use_wandb: True
   device: cuda
   label_to_name: # dataset's classes
-    0: pedestrian
-    1: people
-    2: bicycle
-    3: car
-    4: van
-    5: truck
-    6: tricycle
-    7: awning-tricycle
-    8: bus
-    9: motor
+    0: crack
+
   use_one_class: False
 
   img_size: [640, 640] # (h, w)
@@ -49,7 +42,7 @@ train:
   epochs: 55
   early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
-  num_workers: 12
+  num_workers: 10
 
   ### Validation ###
   conf_thresh: 0.5

@@ -236,6 +236,101 @@ class DFINECriterion(nn.Module):
 
         return losses
 
+    def _prepare_target_masks(self, targets, indices, out_h, out_w, device):
+        """
+        Returns a single tensor of GT masks stacked in matched order:
+        shape -> [M, out_h, out_w] (float32 in {0,1})
+        If a sample has no masks (or misaligned counts), its matches are skipped.
+        """
+        tgt_masks_list = []
+        valid_match_counts = 0
+        for t, (_, J) in zip(targets, indices):
+            if "masks" not in t or t["masks"] is None or t["masks"].numel() == 0:
+                # no masks for this image -> skip all its matched pairs for mask loss
+                continue
+            # Expect per-instance masks aligned with labels: (N, H, W)
+            m = t["masks"]
+            if m.dim() != 3:  # robustify
+                # treat as no masks if unexpected shape
+                continue
+            # keep only the matched instances for this image
+            if J.numel() == 0:
+                continue
+            m_sel = m[J]  # [Mi, H, W]
+            # resize to prediction size
+            m_sel = m_sel.unsqueeze(1).float().to(device)  # [Mi,1,H,W]
+            m_sel = F.interpolate(m_sel, size=(out_h, out_w), mode="nearest")  # preserve binary
+            m_sel = m_sel.squeeze(1).clamp_(0, 1)  # [Mi,out_h,out_w]
+            tgt_masks_list.append(m_sel)
+            valid_match_counts += m_sel.shape[0]
+
+        if len(tgt_masks_list) == 0:
+            return torch.zeros(0, out_h, out_w, device=device, dtype=torch.float32), 0
+
+        return torch.cat(tgt_masks_list, dim=0), valid_match_counts
+
+    def _dice_loss(self, pred_logits, tgt_masks, eps=1e-6):
+        """
+        pred_logits: [M, H, W] (logits)
+        tgt_masks  : [M, H, W] (0/1)
+        returns scalar mean Dice loss
+        """
+        pred = pred_logits.sigmoid()
+        pred = pred.flatten(1)
+        tgt = tgt_masks.flatten(1)
+        inter = (pred * tgt).sum(dim=1)
+        denom = pred.sum(dim=1) + tgt.sum(dim=1) + eps
+        dice = 1.0 - (2.0 * inter + eps) / denom
+        return dice.mean() if dice.numel() > 0 else pred_logits.sum() * 0.0
+
+    def loss_masks(self, outputs, targets, indices, num_boxes):
+        """
+        BCE and Dice loss for masks.
+        input:
+            outputs["pred_masks"]: [B, Q, Hm, Wm] (logits)
+            targets[i]["masks"]: (Ni, H, W) per image (uint8/bool/float), per-instance
+
+        target mask downscaled to pred masks size, then compute loss.
+        """
+        if "pred_masks" not in outputs:
+            return {}
+
+        pred_masks = outputs["pred_masks"]  # [B,Q,Hm,Wm]
+        B, Q, Hm, Wm = pred_masks.shape
+
+        # Gather predictions for matched queries
+        b_idx, q_idx = self._get_src_permutation_idx(indices)  # shapes [M], [M]
+        if b_idx.numel() == 0:
+            # no matches -> zero loss
+            zero = pred_masks.sum() * 0
+            return {"loss_mask_bce": zero, "loss_mask_dice": zero}
+
+        pred_sel = pred_masks[b_idx, q_idx]  # [M, Hm, Wm]
+
+        # Prepare matched GT masks resized to (Hm, Wm)
+        tgt_sel, valid_M = self._prepare_target_masks(
+            targets, indices, Hm, Wm, device=pred_masks.device
+        )
+        if valid_M == 0:
+            zero = pred_sel.sum() * 0
+            return {"loss_mask_bce": zero, "loss_mask_dice": zero}
+
+        # If for robustness some matched pairs were skipped (no GT mask),
+        # align pred_sel length to tgt_sel (take the same count from the start).
+        if pred_sel.shape[0] != tgt_sel.shape[0]:
+            M = min(pred_sel.shape[0], tgt_sel.shape[0])
+            pred_sel = pred_sel[:M]
+            tgt_sel = tgt_sel[:M]
+
+        # BCE (average over pixels per instance, then mean over instances), normalized like others
+        bce_per_pixel = F.binary_cross_entropy_with_logits(pred_sel, tgt_sel, reduction="none")
+        bce_per_inst = bce_per_pixel.mean(dim=(1, 2))
+        loss_mask_bce = bce_per_inst.sum() / max(1, num_boxes)
+
+        # Dice
+        loss_mask_dice = self._dice_loss(pred_sel, tgt_sel)
+        return {"loss_mask_bce": loss_mask_bce, "loss_mask_dice": loss_mask_dice}
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -282,6 +377,7 @@ class DFINECriterion(nn.Module):
             "focal": self.loss_labels_focal,
             "vfl": self.loss_labels_vfl,
             "local": self.loss_local,
+            "masks": self.loss_masks,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)

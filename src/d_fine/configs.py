@@ -29,8 +29,10 @@ base_cfg = {
             "loss_giou": 2,
             "loss_fgl": 0.15,
             "loss_ddf": 1.5,
+            "loss_mask_bce": 1,  # only for mask head
+            "loss_mask_dice": 1,  # only for mask head
         },
-        "losses": ["vfl", "boxes", "local"],
+        "losses": ["vfl", "boxes", "local"],  #  "masks" will be added if training with segment task
         "alpha": 0.75,
         "gamma": 2.0,
         "reg_max": 32,
@@ -70,6 +72,7 @@ sizes_cfg = {
             "reg_scale": 4,
             "num_points": [6, 6],
             "dim_feedforward": 512,
+            "mask_dim": 256,
         },
     },
     "s": {
@@ -97,6 +100,7 @@ sizes_cfg = {
             "num_layers": 3,
             "reg_scale": 4,
             "num_points": [3, 6, 3],
+            "mask_dim": 256,
         },
     },
     "m": {
@@ -125,6 +129,8 @@ sizes_cfg = {
             "num_layers": 4,
             "reg_scale": 4,
             "num_points": [3, 6, 3],
+            "enable_mask_head": False,
+            "mask_dim": 256,
         },
     },
     "l": {
@@ -153,6 +159,7 @@ sizes_cfg = {
             "num_layers": 6,
             "reg_scale": 4,
             "num_points": [3, 6, 3],
+            "mask_dim": 256,
         },
     },
     "x": {
@@ -181,6 +188,7 @@ sizes_cfg = {
             "num_layers": 6,
             "reg_scale": 8,
             "num_points": [3, 6, 3],
+            "mask_dim": 256,
         },
     },
 }

@@ -37,6 +37,15 @@ Note: if you don't pass any parameters, you can run any of these scripts with `m
 5. Run `train` script, changing confurations, iterating, untill you get desired results.
 6. Run `export`script to create ONNX, TensorRT, OpenVINO models.
 
+## Labels format
+One row = one object
+
+Detection:
+[class_id, xc, yc, w, h], coords normalized
+
+Segmentation:
+[class_id, xy, xy, ...], coords normalized. Length = number of points + 1
+
 [Training example with Colab](https://colab.research.google.com/drive/1ZV12qnUQMpC0g3j-0G-tYhmmdM98a41X?usp=sharing)
 
 If you run train script passing the args in the command and not changing them in the config file - you should also pass changed args to other scripts like `export` or `infer`. Example:

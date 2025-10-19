@@ -16,11 +16,54 @@ from src.dl.utils import (
     LetterboxRect,
     abs_xyxy_to_norm_xywh,
     get_mosaic_coordinate,
+    norm_poly_to_abs,
     norm_xywh_to_abs_xyxy,
+    poly_abs_to_mask,
     random_affine,
     seed_worker,
     vis_one_box,
 )
+
+
+def parse_yolo_label_file(path: Path):
+    """
+    Supports both pure detection lines (5 cols) and YOLO-Seg lines (>=7 cols).
+    Returns:
+      boxes_norm: np.ndarray (N,5) -> [cls, xc, yc, w, h] in norm (float32)
+      polys_norm: list[np.ndarray] -> each (K,2) normalized polygon (float32) or [] if none
+    """
+    boxes_norm = []
+    polys_norm = []  # keep normalized here
+
+    with open(path, "r") as f:
+        for ln, raw in enumerate(f, 1):
+            s = raw.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            cl = float(parts[0])
+
+            nums = [float(x) for x in parts[1:]]  # variable length
+            if len(nums) == 4:  # bbox annotations
+                boxes_norm.append([cl, *nums[:4]])
+                polys_norm.append(np.empty((0, 2), dtype=np.float32))  # no polygon
+            elif len(nums) >= 6:  # segmentation annotations
+                if len(nums) % 2 == 1:
+                    nums = nums[:-1]
+                poly = np.array(nums).reshape(-1, 2)  # (K, 2)
+                polys_norm.append(poly)
+                x_min, y_min = poly.min(axis=0)
+                x_max, y_max = poly.max(axis=0)
+                boxes_norm.append(
+                    [cl, (x_min + x_max) / 2, (y_min + y_max) / 2, x_max - x_min, y_max - y_min]
+                )
+            else:
+                raise ValueError(f"Invalid label line (wrong number of values) {path}:{ln}: {s}")
+
+    if len(boxes_norm) == 0:
+        return np.zeros((0, 5), dtype=np.float32), []
+    boxes_norm = np.asarray(boxes_norm, dtype=np.float32)
+    return boxes_norm, polys_norm
 
 
 class CustomDataset(Dataset):
@@ -42,6 +85,7 @@ class CustomDataset(Dataset):
         self.mode = mode
         self.ignore_background = False
         self.label_to_name = cfg.train.label_to_name
+        self.return_masks = str(cfg.task).lower() == "segment"
 
         self.mosaic_prob = cfg.train.mosaic_augs.mosaic_prob
         self.mosaic_scale = cfg.train.mosaic_augs.mosaic_scale
@@ -126,7 +170,13 @@ class CustomDataset(Dataset):
         self.mosaic_transform = A.Compose(norm)
 
     def _debug_image(
-        self, idx, image: torch.Tensor, boxes: torch.Tensor, classes: torch.Tensor, img_path: Path
+        self,
+        idx,
+        image: torch.Tensor,
+        boxes: torch.Tensor,
+        classes: torch.Tensor,
+        img_path: Path,
+        masks=None,
     ) -> None:
         # Unnormalize the image
         mean = np.array(self.norm[0]).reshape(-1, 1, 1)
@@ -140,6 +190,14 @@ class CustomDataset(Dataset):
         # Convert pixel values from [0, 1] to [0, 255]
         image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
         image_np = np.ascontiguousarray(image_np)
+
+        if masks is not None and masks.numel() > 0:
+            mnp = masks.cpu().numpy()
+            for k in range(mnp.shape[0]):
+                cnts, _ = cv2.findContours(
+                    mnp[k].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                cv2.drawContours(image_np, cnts, -1, (0, 255, 0), 2)
 
         # Draw bounding boxes and class IDs
         boxes_np = boxes.cpu().numpy().astype(int)
@@ -168,27 +226,31 @@ class CustomDataset(Dataset):
 
         # Get labels
         labels_path = self.root_path / "labels" / f"{image_path.stem}.txt"
+
+        targets = np.zeros((0, 5), dtype=np.float32)
+        polys_abs = []  # list[(K, 2)] normalized; may be []
+
         if labels_path.exists() and labels_path.stat().st_size:
-            targets = np.loadtxt(labels_path)
-            if targets.ndim == 1:  # Handle the case with only one object
-                targets = targets.reshape(1, -1)
+            boxes_norm, polys_norm = parse_yolo_label_file(labels_path)
 
-            if self.use_one_class:
-                targets[:, 0] = 0
+            if boxes_norm.shape[0] and self.use_one_class:
+                boxes_norm[:, 0] = 0
 
-            targets[:, 1:] = norm_xywh_to_abs_xyxy(targets[:, 1:], height, width).astype(np.float32)
-            return image, targets, orig_size
-        targets = np.zeros((1, 5), dtype=np.float32)
-        return image, targets, orig_size
+            xyxy_abs = norm_xywh_to_abs_xyxy(boxes_norm[:, 1:5], height, width).astype(np.float32)
+            targets = np.concatenate([boxes_norm[:, [0]], xyxy_abs], axis=1)  # [N,5]
+            polys_abs = [norm_poly_to_abs(p, height, width) for p in polys_norm]
+        return image, targets, orig_size, polys_abs
 
     def _load_mosaic(self, idx):
         mosaic_targets = []
+        mosaic_segments = []
         yc = int(random.uniform(self.target_h * 0.6, self.target_h * 1.4))
         xc = int(random.uniform(self.target_w * 0.6, self.target_w * 1.4))
         indices = [idx] + [random.randint(0, self.__len__() - 1) for _ in range(3)]
 
+        mosaic_img = None
         for i_mosaic, m_idx in enumerate(indices):
-            img, targets, _ = self._get_data(m_idx)
+            img, targets, _, polys_abs = self._get_data(m_idx)
             (h, w, c) = img.shape[:3]
 
             if self.keep_ratio:
@@ -202,7 +264,7 @@ class CustomDataset(Dataset):
             )
             (h, w, c) = img.shape[:3]
 
-            if i_mosaic == 0:
+            if mosaic_img is None:
                 mosaic_img = np.full((self.target_h * 2, self.target_w * 2, c), 114, dtype=np.uint8)
 
             (l_x1, l_y1, l_x2, l_y2), (s_x1, s_y1, s_x2, s_y2) = get_mosaic_coordinate(
@@ -212,14 +274,23 @@ class CustomDataset(Dataset):
             mosaic_img[l_y1:l_y2, l_x1:l_x2] = img[s_y1:s_y2, s_x1:s_x2]
             padw, padh = l_x1 - s_x1, l_y1 - s_y1
 
-            targets = targets.copy()
-            # Normalized xywh to pixel xyxy format
             if targets.size > 0:
+                targets = targets.copy()
                 targets[:, 1] = scale_w * targets[:, 1] + padw
                 targets[:, 2] = scale_h * targets[:, 2] + padh
                 targets[:, 3] = scale_w * targets[:, 3] + padw
                 targets[:, 4] = scale_h * targets[:, 4] + padh
             mosaic_targets.append(targets)
+
+            # adjust polygons 1:1 with targets rows
+            for p in polys_abs:
+                if p.size == 0:
+                    mosaic_segments.append(np.empty((0, 2), dtype=np.float32))
+                    continue
+                pp = p.astype(np.float32).copy()
+                pp[:, 0] = pp[:, 0] * scale_w + padw
+                pp[:, 1] = pp[:, 1] * scale_h + padh
+                mosaic_segments.append(pp)
 
         if len(mosaic_targets):
             mosaic_targets = np.concatenate(mosaic_targets, 0)
@@ -228,10 +299,10 @@ class CustomDataset(Dataset):
             np.clip(mosaic_targets[:, 3], 0, 2 * self.target_w, out=mosaic_targets[:, 3])
             np.clip(mosaic_targets[:, 4], 0, 2 * self.target_h, out=mosaic_targets[:, 4])
 
-        mosaic_img, mosaic_targets = random_affine(
+        mosaic_img, mosaic_targets, mosaic_segs = random_affine(
             mosaic_img,
-            mosaic_targets,
-            segments=[],
+            mosaic_targets if len(mosaic_targets) else np.zeros((0, 5), dtype=np.float32),
+            mosaic_segments if len(mosaic_segments) else [],
             target_size=(self.target_w, self.target_h),
             degrees=self.degrees,
             translate=self.translate,
@@ -239,50 +310,104 @@ class CustomDataset(Dataset):
             shear=self.shear,
         )
 
-        # this should be in processing
-        box_heights = mosaic_targets[:, 3] - mosaic_targets[:, 1]
-        box_widths = mosaic_targets[:, 4] - mosaic_targets[:, 2]
-        mosaic_targets = mosaic_targets[np.minimum(box_heights, box_widths) > 1]
+        # remove tiny boxes after affine
+        if mosaic_targets.shape[0]:
+            box_heights = mosaic_targets[:, 3] - mosaic_targets[:, 1]
+            box_widths = mosaic_targets[:, 4] - mosaic_targets[:, 2]
+            keep = np.minimum(box_heights, box_widths) > 1
+            mosaic_targets = mosaic_targets[keep]
+            mosaic_segs = [p for p, k in zip(mosaic_segs, keep) if k]
+        else:
+            mosaic_segs = []
 
         image = self.mosaic_transform(image=mosaic_img)["image"]
         labels = torch.tensor(mosaic_targets[:, 0], dtype=torch.int64)
         boxes = torch.tensor(mosaic_targets[:, 1:], dtype=torch.float32)
-        return image, labels, boxes, (self.target_h, self.target_w)
+
+        # rasterize masks from transformed polygons
+        if self.return_masks and len(mosaic_segs):
+            H, W = self.target_h, self.target_w
+            masks = [
+                poly_abs_to_mask(p, H, W) if p.size else np.zeros((H, W), np.uint8)
+                for p in mosaic_segs
+            ]
+            masks_t = torch.from_numpy(np.stack(masks, 0)).to(torch.uint8)
+        else:
+            masks_t = torch.zeros((0, self.target_h, self.target_w), dtype=torch.uint8)
+        return image, labels, boxes, masks_t, (self.target_h, self.target_w)
 
     def close_mosaic(self):
         self.mosaic_prob = 0.0
         logger.info("Closing mosaic")
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        returns
+            image: CHW tensor
+            labels: (N,) long
+            boxes: (N,4) normalized xywh
+            masks_t: (N,H,W) uint8 (possibly N=0)
+            image_path: Path
+            orig_size: torch.tensor([H, W])
+        """
         image_path = Path(self.split.iloc[idx].values[0])
         if random.random() < self.mosaic_prob:
-            image, labels, boxes, orig_size = self._load_mosaic(idx)
+            image, labels, boxes, masks_t, orig_size = self._load_mosaic(idx)
         else:
-            image, targets, orig_size = self._get_data(idx)  # boxes in abs xyxy format
+            image, targets, orig_size, polys_abs = self._get_data(idx)  # boxes in abs xyxy format
 
             if self.ignore_background and np.all(targets == 0) and self.mode == "train":
                 return None
 
-            box_heights = targets[:, 3] - targets[:, 1]
-            box_widths = targets[:, 4] - targets[:, 2]
-            targets = targets[np.minimum(box_heights, box_widths) > 0]
+            # remove tiny objects
+            if targets.shape[0]:
+                box_heights = targets[:, 3] - targets[:, 1]
+                box_widths = targets[:, 4] - targets[:, 2]
+                keep = np.minimum(box_heights, box_widths) > 0
+                targets = targets[keep]
+                polys_abs = [p for p, k in zip(polys_abs, keep) if k]
+            else:
+                polys_abs = []
+
+            masks_list = []
+            if self.return_masks and len(polys_abs) > 0:
+                H, W = image.shape[0], image.shape[1]
+                masks_list = [poly_abs_to_mask(p, H, W) for p in polys_abs]
 
             # Apply transformations
-            transformed = self.transform(
-                image=image, bboxes=targets[:, 1:], class_labels=targets[:, 0]
-            )
+            if self.return_masks:
+                transformed = self.transform(
+                    image=image, bboxes=targets[:, 1:], class_labels=targets[:, 0], masks=masks_list
+                )
+                masks = transformed.get("masks", [])
+                if len(masks):
+                    masks_t = torch.stack([m.squeeze().to(dtype=torch.uint8) for m in masks], dim=0)
+                else:
+                    masks_t = torch.zeros(
+                        (0, transformed["image"].shape[1], transformed["image"].shape[2]),
+                        dtype=torch.uint8,
+                    )
+            else:
+                transformed = self.transform(
+                    image=image, bboxes=targets[:, 1:], class_labels=targets[:, 0]
+                )
+                masks_t = torch.zeros(
+                    (0, transformed["image"].shape[1], transformed["image"].shape[2]),
+                    dtype=torch.uint8,
+                )
+
             image = transformed["image"]  # RGB, CHW
-            boxes = torch.tensor(transformed["bboxes"], dtype=torch.float32)
+            boxes = torch.tensor(transformed["bboxes"], dtype=torch.float32)  # abs xyxy
             labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
 
         if self.debug_img_processing and idx <= self.cases_to_debug:
-            self._debug_image(idx, image, boxes, labels, image_path)
+            self._debug_image(idx, image, boxes, labels, image_path, masks=masks_t)
 
         # return back to normalized format for model
         boxes = torch.tensor(
             abs_xyxy_to_norm_xywh(boxes, image.shape[1], image.shape[2]), dtype=torch.float32
         )
-        return image, labels, boxes, image_path, orig_size
+        return image, labels, boxes, masks_t, image_path, orig_size
 
     def __len__(self):
         return len(self.split)
@@ -331,7 +456,7 @@ class Loader:
                 labels_path = self.root_path / "labels" / f"{Path(image_path).stem}.txt"
                 if not (labels_path.exists() and labels_path.stat().st_size):
                     continue
-                targets = np.loadtxt(labels_path)
+                targets, _ = parse_yolo_label_file(labels_path)
                 if targets.ndim == 1:
                     targets = targets.reshape(1, -1)
                 labels = targets[:, 0]
@@ -434,14 +559,17 @@ class Loader:
         images = []
         targets = []
         img_paths = []
-        orig_sizes = []
 
         for item in batch:
-            target_dict = {"boxes": item[2], "labels": item[1], "orig_size": item[4]}
+            target_dict = {
+                "labels": item[1],
+                "boxes": item[2],
+                "masks": item[3],
+                "orig_size": item[5],
+            }
             images.append(item[0])
             targets.append(target_dict)
-            img_paths.append(item[3])
-            orig_sizes.append(item[4])
+            img_paths.append(item[4])
 
         images = torch.stack(images, dim=0)
         return images, targets, img_paths
@@ -466,4 +594,12 @@ class Loader:
             images = torch.nn.functional.interpolate(
                 images, size=(new_h, new_w), mode="bilinear", align_corners=False
             )
+
+            for t in targets:
+                m = t["masks"]
+                if m.numel() == 0:
+                    continue
+                m = m.unsqueeze(1).float()  # (N,1,H,W)
+                m = torch.nn.functional.interpolate(m, size=(new_h, new_w), mode="nearest")
+                t["masks"] = (m.squeeze(1) > 0.5).to(torch.uint8)  # back to (N,H,W)
         return images, targets, img_paths

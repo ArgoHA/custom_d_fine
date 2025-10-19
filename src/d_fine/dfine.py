@@ -47,10 +47,13 @@ class DFINE(nn.Module):
         return self
 
 
-def build_model(model_name, num_classes, device, img_size=None, pretrained_model_path=None):
+def build_model(
+    model_name, num_classes, enable_mask_head, device, img_size=None, pretrained_model_path=None
+):
     model_cfg = models[model_name]
     model_cfg["HybridEncoder"]["eval_spatial_size"] = img_size
     model_cfg["DFINETransformer"]["eval_spatial_size"] = img_size
+    model_cfg["DFINETransformer"]["enable_mask_head"] = enable_mask_head
 
     backbone = HGNetv2(**model_cfg["HGNetv2"])
     encoder = HybridEncoder(**model_cfg["HybridEncoder"])
@@ -65,8 +68,10 @@ def build_model(model_name, num_classes, device, img_size=None, pretrained_model
     return model.to(device)
 
 
-def build_loss(model_name, num_classes, label_smoothing):
+def build_loss(model_name, num_classes, label_smoothing, enable_mask_head):
     model_cfg = models[model_name]
+    if enable_mask_head:
+        model_cfg["DFINECriterion"]["losses"].append("masks")
     matcher = HungarianMatcher(**model_cfg["matcher"])
     loss_fn = DFINECriterion(
         matcher,

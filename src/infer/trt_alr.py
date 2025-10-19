@@ -1,44 +1,34 @@
+from collections import OrderedDict
 from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
+import tensorrt as trt
 import torch
 import torch.nn.functional as F
-from loguru import logger
 from numpy.typing import NDArray
-from torch.amp import autocast
-from torchvision.ops import nms
-
-from src.d_fine.dfine import build_model
 
 
-class Torch_model:
+class TRT_model:
     def __init__(
         self,
-        model_name: str,
         model_path: str,
         n_outputs: int,
         input_width: int = 640,
         input_height: int = 640,
         conf_thresh: float = 0.5,
-        rect: bool = False,  # cuts paddings, inference is faster, accuracy might be lower
+        rect: bool = False,  # No need for rectangular inference with fixed size
         half: bool = False,
         keep_ratio: bool = False,
-        use_nms: bool = False,
-        enable_mask_head: bool = False,
         device: str = None,
-    ):
+    ) -> None:
         self.input_size = (input_height, input_width)
         self.n_outputs = n_outputs
-        self.model_name = model_name
         self.model_path = model_path
         self.rect = rect
         self.half = half
         self.keep_ratio = keep_ratio
-        self.use_nms = use_nms
-        self.enable_mask_head = enable_mask_head
         self.channels = 3
-        self.debug_mode = False
 
         if isinstance(conf_thresh, float):
             self.conf_threshs = [conf_thresh] * self.n_outputs
@@ -46,42 +36,74 @@ class Torch_model:
             self.conf_threshs = conf_thresh
 
         if not device:
-            self.device = torch.device("cpu")
-            if torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-            if torch.cuda.is_available():
-                self.device = torch.device("cuda")
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
 
         self.np_dtype = np.float32
-        if self.half:
-            self.amp_enabled = True
-        else:
-            self.amp_enabled = False
 
         self._load_model()
         self._test_pred()
 
     def _load_model(self):
-        self.model = build_model(
-            self.model_name,
-            self.n_outputs,
-            self.enable_mask_head == "segment",
-            self.device,
-            img_size=None,
-        )
-        self.model.load_state_dict(
-            torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu")),
-            strict=False,
-        )
-        self.model.eval()
-        self.model.to(self.device)
+        logger = trt.Logger(trt.Logger.ERROR)
+        with open(self.model_path, "rb") as f:
+            runtime = trt.Runtime(logger)
+            self.engine = runtime.deserialize_cuda_engine(f.read())
 
-        logger.info(f"Torch model, Device: {self.device}, AMP: {self.amp_enabled}")
+        self.context = self.engine.create_execution_context()
+        self.stream = torch.cuda.current_stream().cuda_stream
+
+        #  discover tensors
+        self.input_name = None
+        self.output_info = OrderedDict()  # name → (dtype, shape)
+
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+
+            if mode == trt.TensorIOMode.INPUT:
+                assert self.input_name is None, "multiple inputs not handled"
+                self.input_name = name
+                in_dtype = self._torch_dtype_from_trt(self.engine.get_tensor_dtype(name))
+
+            elif mode == trt.TensorIOMode.OUTPUT:
+                o_dtype = self._torch_dtype_from_trt(self.engine.get_tensor_dtype(name))
+                self.output_info[name] = (o_dtype, tuple(self.engine.get_tensor_shape(name)))
+
+        assert self.input_name and self.output_info, "failed to find I/O tensors"
+
+        # pre-allocate output buffers
+        self.out_bufs = {}
+        for name, (dtype, shape) in self.output_info.items():
+            # replace dynamic batch dim (-1) with max_batch (usually 1)
+            shape = tuple((self.max_batch_size if s < 0 else s) for s in shape)
+            buf = torch.empty(shape, dtype=dtype, device=self.device)
+            self.out_bufs[name] = buf
+            self.context.set_tensor_address(name, int(buf.data_ptr()))
+
+        # static part of the input shape
+        # batch dim will change each call, H&W are fixed (640×640 here)
+        static_shape = (1, self.channels, self.input_size[0], self.input_size[1])
+        self.context.set_input_shape(self.input_name, static_shape)
+
+    @staticmethod
+    def _torch_dtype_from_trt(trt_dtype):
+        if trt_dtype == trt.float32:
+            return torch.float32
+        elif trt_dtype == trt.float16:
+            return torch.float16
+        elif trt_dtype == trt.int32:
+            return torch.int32
+        elif trt_dtype == trt.int8:
+            return torch.int8
+        else:
+            raise TypeError(f"Unsupported TensorRT data type: {trt_dtype}")
 
     def _test_pred(self) -> None:
-        random_image = np.random.randint(0, 255, size=(1100, 1000, self.channels), dtype=np.uint8)
+        random_image = np.random.randint(
+            0, 255, size=(1100, 1000, self.channels), dtype=np.uint8
+        )
         processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(random_image)
         preds = self._predict(processed_inputs)
         self._postprocess(preds, processed_sizes, original_sizes)
@@ -121,7 +143,7 @@ class Torch_model:
         """
         returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
         """
-        logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
+        logits, boxes = outputs[0], outputs[1]
         boxes = self.process_boxes(
             boxes, processed_sizes, original_sizes, self.keep_ratio, self.device
         )  # B x TopQ x 4
@@ -177,14 +199,6 @@ class Torch_model:
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, then HWC to CHW
         img = np.ascontiguousarray(img, dtype=self.np_dtype)
         img /= 255.0
-
-        # save debug image
-        if self.debug_mode:
-            debug_img = img.reshape([1, *img.shape])
-            debug_img = debug_img[0].transpose(1, 2, 0)  # CHW to HWC
-            debug_img = (debug_img * 255.0).astype(np.uint8)  # Convert to uint8
-            debug_img = debug_img[:, :, ::-1]  # RGB to BGR for saving
-            cv2.imwrite("torch_infer.jpg", debug_img)
         return img
 
     def _prepare_inputs(self, inputs):
@@ -209,12 +223,22 @@ class Torch_model:
                 )
         return torch.tensor(processed_inputs).to(self.device), processed_sizes, original_sizes
 
-    @torch.no_grad()
-    def _predict(self, inputs) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-        if self.amp_enabled:
-            with autocast("cuda"):
-                return self.model(inputs)
-        return self.model(inputs)
+    def _predict(self, img: torch.Tensor):
+        """
+        img shape: (B, C, H, W) already on CUDA
+        returns a list of torch.Tensors [logits, boxes] sliced to batch B
+        """
+        B = img.shape[0]
+
+        # 1) give TRT the input address and actual batch shape
+        self.context.set_input_shape(self.input_name, img.shape)  # dynamic B
+        self.context.set_tensor_address(self.input_name, int(img.data_ptr()))
+
+        # 2) run
+        self.context.execute_async_v3(self.stream)
+
+        # 3) slice only the first B rows from our pre-allocated buffers
+        return [buf[:B] for buf in self.out_bufs.values()]
 
     def _postprocess(
         self,
@@ -224,17 +248,6 @@ class Torch_model:
     ):
         output = self._preds_postprocess(preds, processed_sizes, original_sizes)
         output = filter_preds(output, self.conf_threshs)
-        if self.use_nms:
-            for idx, res in enumerate(output):
-                boxes, scores, classes = non_max_suppression(
-                    res["boxes"],
-                    res["scores"],
-                    res["labels"],
-                    iou_threshold=0.5,
-                )
-                output[idx]["boxes"] = boxes
-                output[idx]["scores"] = scores
-                output[idx]["labels"] = classes
 
         for res in output:
             res["labels"] = res["labels"].cpu().numpy()
@@ -242,7 +255,6 @@ class Torch_model:
             res["scores"] = res["scores"].cpu().numpy()
         return output
 
-    @torch.no_grad()
     def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, np.ndarray]]:
         """
         Input image as ndarray (BGR, HWC) or BHWC
@@ -313,10 +325,6 @@ def clip_boxes(boxes, shape):
 
 
 def scale_boxes_ratio_kept(boxes, img1_shape, img0_shape, ratio_pad=None, padding=True):
-    """
-    img1_shape: (height, width) after resize
-    img0_shape: (height, width) before resize
-    """
     # Rescale boxes (xyxy) from img1_shape to img0_shape
     if ratio_pad is None:  # calculate from img0_shape
         gain = min(
@@ -376,81 +384,3 @@ def filter_preds(preds, conf_threshs: List[float]):
         pred["boxes"] = pred["boxes"][mask]
         pred["labels"] = pred["labels"][mask]
     return preds
-
-
-def non_max_suppression(boxes, scores, classes, iou_threshold=0.5):
-    """
-    Applies Non-Maximum Suppression (NMS) to filter bounding boxes.
-
-    Parameters:
-    - boxes (torch.Tensor): Tensor of shape (N, 4) containing bounding boxes in [x1, y1, x2, y2] format.
-    - scores (torch.Tensor): Tensor of shape (N,) containing confidence scores for each box.
-    - classes (torch.Tensor): Tensor of shape (N,) containing class indices for each box.
-    - score_threshold (float): Minimum confidence score to consider a box for NMS.
-    - iou_threshold (float): Intersection Over Union (IOU) threshold for NMS.
-
-    Returns:
-    - filtered_boxes (torch.Tensor): Tensor containing filtered bounding boxes after NMS.
-    - filtered_scores (torch.Tensor): Tensor containing confidence scores of the filtered boxes.
-    - filtered_classes (torch.Tensor): Tensor containing class indices of the filtered boxes.
-    """
-    # Prepare lists to collect the filtered boxes, scores, and classes
-    filtered_boxes = []
-    filtered_scores = []
-    filtered_classes = []
-
-    # Get unique classes present in the detections
-    unique_classes = classes.unique()
-
-    # Step 2: Perform NMS for each class separately
-    for unique_class in unique_classes:
-        # Get indices of boxes belonging to the current class
-        cls_mask = classes == unique_class
-        cls_boxes = boxes[cls_mask]
-        cls_scores = scores[cls_mask]
-
-        # Apply NMS for the current class
-        nms_indices = nms(cls_boxes, cls_scores, iou_threshold)
-
-        # Collect the filtered boxes, scores, and classes
-        filtered_boxes.append(cls_boxes[nms_indices])
-        filtered_scores.append(cls_scores[nms_indices])
-        filtered_classes.append(classes[cls_mask][nms_indices])
-
-    # Step 3: Concatenate the results
-    if filtered_boxes:
-        filtered_boxes = torch.cat(filtered_boxes)
-        filtered_scores = torch.cat(filtered_scores)
-        filtered_classes = torch.cat(filtered_classes)
-    else:
-        # If no boxes remain after NMS, return empty tensors
-        filtered_boxes = torch.empty((0, 4))
-        filtered_scores = torch.empty((0,))
-        filtered_classes = torch.empty((0,), dtype=classes.dtype)
-
-    return filtered_boxes, filtered_scores, filtered_classes
-
-
-if __name__ == "__main__":
-    from pathlib import Path
-
-    from src.dl.infer import run_videos
-
-    model = Torch_model(
-        model_name="m",
-        model_path="/Users/argosaakyan/Data/firevision/models/baseline_m_2025-06-23/model.pt",
-        n_outputs=2,
-        input_width=640,
-        input_height=640,
-        conf_thresh=0.4,
-        device="mps",
-    )
-
-    run_videos(
-        torch_model=model,
-        folder_path=Path("/Users/argosaakyan/Data/firevision/datasets"),
-        output_path=Path("/Users/argosaakyan/Data/firevision/ex"),
-        label_to_name={0: "fire", 1: "no fire"},
-        to_crop=False,
-        paddings=0,
-    )
