@@ -13,6 +13,7 @@ python -m src.dl.train          # Runs the training pipeline
 python -m src.dl.export         # Exports weights in various formats after training
 python -m src.dl.bench          # Runs all exported models on the test set
 python -m src.dl.infer          # Runs model ontest folder, saves visualisations and txt preds
+python -m src.dl.test_batching  # Gets stats to find hte optimal batch size for your model and GPU
 ```
 
 Note: if you don't pass any parameters, you can run any of these scripts with `make script_name`, for exmaple: `make train` will run `python -m src.dl.train`. You can also just run `make` to run all scripts one by one (excluding last, infer script)
@@ -71,6 +72,7 @@ You can run inference on a folder (path_to_test_data) of images or on a folder o
 - **Evaluation predicts**: Visualised model's predictions on val set. Includes GT as green and preds as blue.
 - **Bench images**: Visualised model's predictions with inference class. Uses all exported models
 - **Infer**: Visualised model's predictions and predicted annotations in yolo txt format
+- **Test batching**: Csv file with all tested batch sizes and latency
 
 ## Results examples
 **Train**
