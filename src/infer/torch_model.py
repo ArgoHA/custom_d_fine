@@ -45,11 +45,11 @@ class Torch_model:
             self.conf_threshs = conf_thresh
 
         if not device:
-            self.device = torch.device("cpu")
+            self.device = "cpu"
             if torch.backends.mps.is_available():
-                self.device = torch.device("mps")
+                self.device = "mps"
             if torch.cuda.is_available():
-                self.device = torch.device("cuda")
+                self.device = "cuda"
         else:
             self.device = device
 
@@ -202,7 +202,7 @@ class Torch_model:
                 )
 
         tensor = torch.from_numpy(processed_inputs)  # no copying
-        if self.device.type == "cuda":
+        if self.device == "cuda":
             tensor = tensor.pin_memory().to(self.device, non_blocking=True)
         else:
             tensor = tensor.to(self.device)
