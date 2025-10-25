@@ -66,7 +66,7 @@ class OV_model:
             self.device,
             config={"PERFORMANCE_HINT": inference_mode},
         )
-        logger.info(f"Running on {self.device}")
+        logger.info(f"OpenVino running on {self.device}")
 
     def _test_pred(self):
         random_image = np.random.randint(0, 255, size=(1000, 1110, self.channels), dtype=np.uint8)

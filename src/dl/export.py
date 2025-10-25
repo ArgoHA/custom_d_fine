@@ -61,12 +61,12 @@ def export_to_onnx(
     torch.onnx.export(
         model,
         x_test,
-        output_path,
-        opset_version=17,
+        opset_version=19,
         input_names=[INPUT_NAME],
         output_names=OUTPUT_NAMES,
-        dynamic_axes=dynamic_axes,
-    )
+        dynamic_axes=dynamic_axes if dynamic_axes else None,
+        dynamo=True,
+    ).save(output_path)
 
     onnx_model = onnx.load(output_path)
     if half:
@@ -83,7 +83,9 @@ def export_to_onnx(
         return output_path
 
 
-def export_to_openvino(onnx_path: Path, x_test, dynamic_input: bool, max_batch_size: int) -> None:
+def export_to_openvino(
+    model: nn.Module, onnx_path: Path, x_test, dynamic_input: bool, max_batch_size: int
+) -> None:
     if not dynamic_input and max_batch_size <= 1:
         inp = None
     elif max_batch_size > 1 and dynamic_input:
@@ -93,11 +95,7 @@ def export_to_openvino(onnx_path: Path, x_test, dynamic_input: bool, max_batch_s
     elif dynamic_input:
         inp = [1, 3, -1, -1]
 
-    model = ov.convert_model(
-        input_model=str(onnx_path),
-        input=inp,
-        example_input=x_test,
-    )
+    model = ov.convert_model(input_model=model, input=inp, example_input=x_test)
     ov.serialize(model, str(onnx_path.with_suffix(".xml")), str(onnx_path.with_suffix(".bin")))
     logger.info("OpenVINO model exported")
 
@@ -155,7 +153,7 @@ def main(cfg: DictConfig):
     _ = model(x_test)
 
     # onnx version
-    export_to_onnx(
+    onnx_path = export_to_onnx(
         model,
         model_path,
         x_test,
@@ -165,27 +163,20 @@ def main(cfg: DictConfig):
     )
 
     # onnx for openvino
-    onnx_path = export_to_onnx(
-        model,
-        model_path,
-        x_test,
-        cfg.export.max_batch_size,
-        half=False,
-        dynamic_input=cfg.export.dynamic_input,
-    )
-    export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
+    export_to_openvino(model, onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
 
-    # onnx for tensorrt
-    static_onnx_path = export_to_onnx(
-        model,
-        model_path,
-        x_test,
-        cfg.export.max_batch_size,
-        False,
-        False,
-    )
+    # static onnx for tensorrt
+    if cfg.export.half or cfg.export.dynamic_input:
+        onnx_path = export_to_onnx(
+            model,
+            model_path,
+            x_test,
+            cfg.export.max_batch_size,
+            False,
+            False,
+        )
     export_to_tensorrt(
-        static_onnx_path,
+        onnx_path,
         cfg.export.half,
         cfg.export.max_batch_size,
     )
