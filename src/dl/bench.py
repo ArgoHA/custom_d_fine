@@ -145,6 +145,7 @@ def test_model(
         preds,
         conf_thresh=conf_thresh,
         iou_thresh=iou_thresh,
+        label_to_name=label_to_name,
     )
     metrics = validator.compute_metrics(extended=False)
 

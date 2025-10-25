@@ -18,6 +18,7 @@ class Validator:
         self,
         gt: List[Dict[str, torch.Tensor]],
         preds: List[Dict[str, torch.Tensor]],
+        label_to_name: Dict[int, str],
         conf_thresh=0.5,
         iou_thresh=0.5,
     ) -> None:
@@ -32,6 +33,7 @@ class Validator:
         self.conf_thresh = conf_thresh
         self.iou_thresh = iou_thresh
         self.thresholds = np.arange(0.2, 1.0, 0.05)
+        self.label_to_name = label_to_name
 
         self.torch_metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
         self.torch_metric.warn_on_many_detections = False
@@ -64,23 +66,33 @@ class Validator:
             fns += value["FNs"]
             ious.extend(value["IoUs"])
 
-            extended_metrics[f"precision_{key}"] = (
+            extended_metrics[f"precision_{self.label_to_name[key]}"] = (
                 value["TPs"] / (value["TPs"] + value["FPs"])
                 if value["TPs"] + value["FPs"] > 0
                 else 0
             )
-            extended_metrics[f"recall_{key}"] = (
+            extended_metrics[f"recall_{self.label_to_name[key]}"] = (
                 value["TPs"] / (value["TPs"] + value["FNs"])
                 if value["TPs"] + value["FNs"] > 0
                 else 0
             )
 
-            extended_metrics[f"iou_{key}"] = np.mean(value["IoUs"])
-            extended_metrics[f"f1_{key}"] = (
+            extended_metrics[f"iou_{self.label_to_name[key]}"] = np.mean(value["IoUs"])
+            extended_metrics[f"f1_{self.label_to_name[key]}"] = (
                 2
-                * (extended_metrics[f"precision_{key}"] * extended_metrics[f"recall_{key}"])
-                / (extended_metrics[f"precision_{key}"] + extended_metrics[f"recall_{key}"])
-                if (extended_metrics[f"precision_{key}"] + extended_metrics[f"recall_{key}"]) > 0
+                * (
+                    extended_metrics[f"precision_{self.label_to_name[key]}"]
+                    * extended_metrics[f"recall_{self.label_to_name[key]}"]
+                )
+                / (
+                    extended_metrics[f"precision_{self.label_to_name[key]}"]
+                    + extended_metrics[f"recall_{self.label_to_name[key]}"]
+                )
+                if (
+                    extended_metrics[f"precision_{self.label_to_name[key]}"]
+                    + extended_metrics[f"recall_{self.label_to_name[key]}"]
+                )
+                > 0
                 else 0
             )
 
@@ -98,70 +110,70 @@ class Validator:
             "extended_metrics": extended_metrics,
         }
 
-    def _compute_matrix_multi_class(self, preds):
-        metrics_per_class = defaultdict(lambda: {"TPs": 0, "FPs": 0, "FNs": 0, "IoUs": []})
-        for pred, gt in zip(preds, self.gt):
-            pred_boxes = pred["boxes"]
-            pred_labels = pred["labels"]
-            gt_boxes = gt["boxes"]
-            gt_labels = gt["labels"]
+    # def _compute_matrix_multi_class(self, preds):
+    #     metrics_per_class = defaultdict(lambda: {"TPs": 0, "FPs": 0, "FNs": 0, "IoUs": []})
+    #     for pred, gt in zip(preds, self.gt):
+    #         pred_boxes = pred["boxes"]
+    #         pred_labels = pred["labels"]
+    #         gt_boxes = gt["boxes"]
+    #         gt_labels = gt["labels"]
 
-            # isolate each class
-            labels = torch.unique(torch.cat([pred_labels, gt_labels]))
-            for label in labels:
-                pred_cl_boxes = pred_boxes[pred_labels == label]  # filter by bool mask
-                gt_cl_boxes = gt_boxes[gt_labels == label]
+    #         # isolate each class
+    #         labels = torch.unique(torch.cat([pred_labels, gt_labels]))
+    #         for label in labels:
+    #             pred_cl_boxes = pred_boxes[pred_labels == label]  # filter by bool mask
+    #             gt_cl_boxes = gt_boxes[gt_labels == label]
 
-                n_preds = len(pred_cl_boxes)
-                n_gts = len(gt_cl_boxes)
-                if not (n_preds or n_gts):
-                    continue
-                if not n_preds:
-                    metrics_per_class[label.item()]["FNs"] += n_gts
-                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
-                    continue
-                if not n_gts:
-                    metrics_per_class[label.item()]["FPs"] += n_preds
-                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
-                    continue
+    #             n_preds = len(pred_cl_boxes)
+    #             n_gts = len(gt_cl_boxes)
+    #             if not (n_preds or n_gts):
+    #                 continue
+    #             if not n_preds:
+    #                 metrics_per_class[label.item()]["FNs"] += n_gts
+    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
+    #                 continue
+    #             if not n_gts:
+    #                 metrics_per_class[label.item()]["FPs"] += n_preds
+    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
+    #                 continue
 
-                ious = box_iou(pred_cl_boxes, gt_cl_boxes)  # matrix of all IoUs
-                ious_mask = ious >= self.iou_thresh
+    #             ious = box_iou(pred_cl_boxes, gt_cl_boxes)  # matrix of all IoUs
+    #             ious_mask = ious >= self.iou_thresh
 
-                # indeces of boxes that have IoU >= threshold
-                pred_indices, gt_indices = torch.nonzero(ious_mask, as_tuple=True)
+    #             # indeces of boxes that have IoU >= threshold
+    #             pred_indices, gt_indices = torch.nonzero(ious_mask, as_tuple=True)
 
-                if not pred_indices.numel():  # no predicts matched gts
-                    metrics_per_class[label.item()]["FNs"] += n_gts
-                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
-                    metrics_per_class[label.item()]["FPs"] += n_preds
-                    metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
-                    continue
+    #             if not pred_indices.numel():  # no predicts matched gts
+    #                 metrics_per_class[label.item()]["FNs"] += n_gts
+    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
+    #                 metrics_per_class[label.item()]["FPs"] += n_preds
+    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
+    #                 continue
 
-                iou_values = ious[pred_indices, gt_indices]
+    #             iou_values = ious[pred_indices, gt_indices]
 
-                # sorting by IoU to match hgihest scores first
-                sorted_indices = torch.argsort(-iou_values)
-                pred_indices = pred_indices[sorted_indices]
-                gt_indices = gt_indices[sorted_indices]
-                iou_values = iou_values[sorted_indices]
+    #             # sorting by IoU to match hgihest scores first
+    #             sorted_indices = torch.argsort(-iou_values)
+    #             pred_indices = pred_indices[sorted_indices]
+    #             gt_indices = gt_indices[sorted_indices]
+    #             iou_values = iou_values[sorted_indices]
 
-                matched_preds = set()
-                matched_gts = set()
-                for pred_idx, gt_idx, iou in zip(pred_indices, gt_indices, iou_values):
-                    if gt_idx.item() not in matched_gts and pred_idx.item() not in matched_preds:
-                        matched_preds.add(pred_idx.item())
-                        matched_gts.add(gt_idx.item())
-                        metrics_per_class[label.item()]["TPs"] += 1
-                        metrics_per_class[label.item()]["IoUs"].append(iou.item())
+    #             matched_preds = set()
+    #             matched_gts = set()
+    #             for pred_idx, gt_idx, iou in zip(pred_indices, gt_indices, iou_values):
+    #                 if gt_idx.item() not in matched_gts and pred_idx.item() not in matched_preds:
+    #                     matched_preds.add(pred_idx.item())
+    #                     matched_gts.add(gt_idx.item())
+    #                     metrics_per_class[label.item()]["TPs"] += 1
+    #                     metrics_per_class[label.item()]["IoUs"].append(iou.item())
 
-                unmatched_preds = set(range(n_preds)) - matched_preds
-                unmatched_gts = set(range(n_gts)) - matched_gts
-                metrics_per_class[label.item()]["FPs"] += len(unmatched_preds)
-                metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_preds))
-                metrics_per_class[label.item()]["FNs"] += len(unmatched_gts)
-                metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_gts))
-        return metrics_per_class
+    #             unmatched_preds = set(range(n_preds)) - matched_preds
+    #             unmatched_gts = set(range(n_gts)) - matched_gts
+    #             metrics_per_class[label.item()]["FPs"] += len(unmatched_preds)
+    #             metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_preds))
+    #             metrics_per_class[label.item()]["FNs"] += len(unmatched_gts)
+    #             metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_gts))
+    #     return metrics_per_class
 
     def _compute_metrics_and_confusion_matrix(self, preds):
         # Initialize per-class metrics

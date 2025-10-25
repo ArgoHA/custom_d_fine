@@ -43,7 +43,11 @@ def wandb_logger(loss, metrics: Dict[str, float], epoch, mode: str) -> None:
         log_data[f"{mode}/loss/"] = loss
 
     for metric_name, metric_value in metrics.items():
-        log_data[f"{mode}/metrics/{metric_name}"] = metric_value
+        if metric_name == "extended_metrics":
+            for ext_metric_name, ext_metric_value in metric_value.items():
+                log_data[f"{mode}_extended/{ext_metric_name}"] = ext_metric_value
+        else:
+            log_data[f"{mode}/metrics/{metric_name}"] = metric_value
 
     wandb.log(log_data)
 
@@ -64,20 +68,13 @@ def rename_metric_keys(d, label_to_name):
 
 
 def log_metrics_locally(
-    all_metrics: Dict[str, Dict[str, float]],
-    path_to_save: Path,
-    epoch: int,
-    extended=False,
-    label_to_name=None,
+    all_metrics: Dict[str, Dict[str, float]], path_to_save: Path, epoch: int, extended=False
 ) -> None:
     metrics_df = pd.DataFrame.from_dict(all_metrics, orient="index")
     metrics_df = metrics_df.round(4)
     if extended:
-        extended_metrics = metrics_df["extended_metrics"].map(
-            lambda d: rename_metric_keys(d, label_to_name)
-        )
         extended_metrics = pd.DataFrame.from_records(
-            extended_metrics.tolist(), index=metrics_df.index
+            metrics_df["extended_metrics"].tolist(), index=metrics_df.index
         ).round(4)
 
     metrics_df = metrics_df[

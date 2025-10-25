@@ -271,6 +271,7 @@ class Trainer:
         conf_thresh: float,
         iou_thresh: float,
         extended: bool,
+        label_to_name: Dict[int, str],
         path_to_save=None,
         mode=None,
     ):
@@ -279,6 +280,7 @@ class Trainer:
             preds,
             conf_thresh=conf_thresh,
             iou_thresh=iou_thresh,
+            label_to_name=label_to_name,
         )
         metrics = validator.compute_metrics(extended=extended)
         if path_to_save:  # val and test
@@ -301,6 +303,7 @@ class Trainer:
             conf_thresh,
             iou_thresh,
             extended=extended,
+            label_to_name=self.label_to_name,
             path_to_save=path_to_save,
             mode=mode,
         )
@@ -510,7 +513,6 @@ def main(cfg: DictConfig) -> None:
             path_to_save=Path(cfg.train.path_to_save),
             epoch=0,
             extended=True,
-            label_to_name=cfg.train.label_to_name,
         )
         logger.info(f"Full training time: {(time.time() - t_start) / 60 / 60:.2f} hours")
 
