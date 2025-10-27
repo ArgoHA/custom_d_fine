@@ -348,10 +348,11 @@ def vis_one_box(img, box, label, mode, label_to_name, score=None):
         color=color,
         thickness=2,
     )
+    y = y1 - 16 if mode == "gt" else y1 - 4
     cv2.putText(
         img,
         f"{prefix}{label_to_name[int(label)]}{postfix}",
-        (x1, max(0, y1 - 5)),
+        (x1, max(0, y)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
         color,
