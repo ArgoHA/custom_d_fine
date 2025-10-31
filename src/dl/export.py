@@ -96,6 +96,12 @@ def export_to_openvino(
         inp = [1, 3, -1, -1]
 
     model = ov.convert_model(input_model=model, input=inp, example_input=x_test)
+
+    # rename inputs and outputs
+    model.inputs[0].tensor.set_names({INPUT_NAME})
+    model.outputs[0].tensor.set_names({OUTPUT_NAMES[0]})
+    model.outputs[1].tensor.set_names({OUTPUT_NAMES[1]})
+
     ov.serialize(model, str(onnx_path.with_suffix(".xml")), str(onnx_path.with_suffix(".bin")))
     logger.info("OpenVINO model exported")
 

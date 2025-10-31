@@ -26,7 +26,7 @@ class OV_model:
         self.input_size = (input_height, input_width)
         self.n_outputs = n_outputs
         self.model_path = model_path
-        self.device = device
+        self.device = device.upper() if device else device
         self.rect = rect
         self.half = half
         self.keep_ratio = keep_ratio
