@@ -428,28 +428,3 @@ def non_max_suppression(boxes, scores, classes, iou_threshold=0.5):
         filtered_classes = torch.empty((0,), dtype=classes.dtype)
 
     return filtered_boxes, filtered_scores, filtered_classes
-
-
-if __name__ == "__main__":
-    from pathlib import Path
-
-    from src.dl.infer import run_videos
-
-    model = Torch_model(
-        model_name="m",
-        model_path="/Users/argosaakyan/Data/firevision/models/baseline_m_2025-06-23/model.pt",
-        n_outputs=2,
-        input_width=640,
-        input_height=640,
-        conf_thresh=0.4,
-        device="mps",
-    )
-
-    run_videos(
-        torch_model=model,
-        folder_path=Path("/Users/argosaakyan/Data/firevision/datasets"),
-        output_path=Path("/Users/argosaakyan/Data/firevision/ex"),
-        label_to_name={0: "fire", 1: "no fire"},
-        to_crop=False,
-        paddings=0,
-    )
