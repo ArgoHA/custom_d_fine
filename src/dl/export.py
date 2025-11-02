@@ -83,9 +83,7 @@ def export_to_onnx(
         return output_path
 
 
-def export_to_openvino(
-    model: nn.Module, onnx_path: Path, x_test, dynamic_input: bool, max_batch_size: int
-) -> None:
+def export_to_openvino(onnx_path: Path, x_test, dynamic_input: bool, max_batch_size: int) -> None:
     if not dynamic_input and max_batch_size <= 1:
         inp = None
     elif max_batch_size > 1 and dynamic_input:
@@ -95,12 +93,7 @@ def export_to_openvino(
     elif dynamic_input:
         inp = [1, 3, -1, -1]
 
-    model = ov.convert_model(input_model=model, input=inp, example_input=x_test)
-
-    # rename inputs and outputs
-    model.inputs[0].tensor.set_names({INPUT_NAME})
-    model.outputs[0].tensor.set_names({OUTPUT_NAMES[0]})
-    model.outputs[1].tensor.set_names({OUTPUT_NAMES[1]})
+    model = ov.convert_model(input_model=str(onnx_path), input=inp, example_input=x_test)
 
     ov.serialize(model, str(onnx_path.with_suffix(".xml")), str(onnx_path.with_suffix(".bin")))
     logger.info("OpenVINO model exported")
@@ -167,9 +160,7 @@ def main(cfg: DictConfig):
         half=cfg.export.half,
         dynamic_input=cfg.export.dynamic_input,
     )
-
-    # onnx for openvino
-    export_to_openvino(model, onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
+    export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
 
     # static onnx for tensorrt
     if cfg.export.half or cfg.export.dynamic_input:

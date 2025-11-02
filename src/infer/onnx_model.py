@@ -49,6 +49,7 @@ class ONNX_model:
         self.model = ort.InferenceSession(
             self.model_path, providers=providers, provider_options=provider_options
         )
+        print(f"ONNX model loaded: {self.model_path} on {self.device}")
 
     def _test_pred(self) -> None:
         """Run one dummy inference so that latent bugs fail fast."""
@@ -284,3 +285,22 @@ def filter_preds(preds, conf_threshs: List[float]):
         p["boxes"] = p["boxes"][mask]
         p["scores"] = p["scores"][mask]
     return preds
+
+
+if __name__ == "__main__":
+    import time
+
+    # model = ONNX_model(model_path="model.onnx", n_outputs=2)
+    model = ONNX_model(
+        model_path="/home/argo/Desktop/Projects/Veryfi/dt/output/models/test_640s_2025-10-31/model.onnx",
+        n_outputs=2,
+    )
+    inp = np.random.randint(0, 255, size=(1920, 1080, 3), dtype=np.uint8)
+
+    latency = []
+
+    for _ in range(100):
+        start = time.perf_counter()
+        outputs = model(inp)
+        latency.append(time.perf_counter() - start)
+    print(f"Average latency: {np.mean(latency) * 1000:.2f} ms")
