@@ -74,6 +74,8 @@ class Trainer:
         self.eval_preds_path = Path(self.cfg.train.eval_preds_path)
         self.init_dirs()
 
+        self.decision_metrics = cfg.train.decision_metrics
+
         if self.use_wandb:
             wandb.init(
                 project=cfg.project_name,
@@ -317,7 +319,9 @@ class Trainer:
         self.path_to_save.mkdir(parents=True, exist_ok=True)
         torch.save(model_to_save.state_dict(), self.path_to_save / "last.pt")
 
-        decision_metric = (metrics["mAP_50"] + metrics["f1"]) / 2
+        # mean from chosen metrics
+        decision_metric = np.mean([metrics[metric_name] for metric_name in self.decision_metrics])
+
         if decision_metric > best_metric:
             best_metric = decision_metric
             logger.info("Saving new best model🔥")

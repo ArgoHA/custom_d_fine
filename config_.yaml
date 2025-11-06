@@ -30,6 +30,10 @@ train:
 
   use_one_class: False
 
+  decision_metrics:
+  - f1
+  - mAP_50
+
   img_size: [640, 640] # (h, w)
   keep_ratio: False # image aspect ratio, if True - image will be padded
   to_visualize_eval: True # save images with gt and preds

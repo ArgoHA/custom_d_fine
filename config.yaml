@@ -34,7 +34,12 @@ train:
     7: awning-tricycle
     8: bus
     9: motor
+
   use_one_class: False
+
+  decision_metrics:
+  - f1
+  - mAP_50
 
   img_size: [640, 640] # (h, w)
   keep_ratio: False # image aspect ratio, if True - image will be padded
