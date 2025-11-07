@@ -168,7 +168,7 @@ class CustomDataset(Dataset):
 
         # Get labels
         labels_path = self.root_path / "labels" / f"{image_path.stem}.txt"
-        if labels_path.exists() and labels_path.stat().st_size:
+        if labels_path.exists() and labels_path.stat().st_size > 1:
             targets = np.loadtxt(labels_path)
             if targets.ndim == 1:  # Handle the case with only one object
                 targets = targets.reshape(1, -1)
@@ -329,7 +329,7 @@ class Loader:
                 continue
             for image_path in split.iloc[:, 0]:
                 labels_path = self.root_path / "labels" / f"{Path(image_path).stem}.txt"
-                if not (labels_path.exists() and labels_path.stat().st_size):
+                if not (labels_path.exists() and labels_path.stat().st_size > 1):
                     continue
                 targets = np.loadtxt(labels_path)
                 if targets.ndim == 1:

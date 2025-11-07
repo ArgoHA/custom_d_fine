@@ -114,7 +114,7 @@ def calculate_remaining_time(
         minutes, _ = divmod(remainder, 60)
         return f"{int(hours):02}:{int(minutes):02}"
 
-    time_for_remaining_epochs = one_epoch_time * (epochs + 1 - epoch)
+    time_for_remaining_epochs = max(one_epoch_time * (epochs + 1 - epoch), 0)
     current_epoch_progress = time.time() - epoch_start_time
     hours, remainder = divmod(time_for_remaining_epochs - current_epoch_progress, 3600)
     minutes, _ = divmod(remainder, 60)

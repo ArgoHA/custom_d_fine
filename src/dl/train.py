@@ -22,6 +22,7 @@ from src.dl.dataset import Loader
 from src.dl.utils import (
     calculate_remaining_time,
     filter_preds,
+    get_latest_experiment_name,
     get_vram_usage,
     log_metrics_locally,
     process_boxes,
@@ -474,6 +475,8 @@ def main(cfg: DictConfig) -> None:
         logger.error(e)
     finally:
         logger.info("Evaluating best model...")
+        cfg.exp = get_latest_experiment_name(cfg.exp, cfg.train.path_to_save)
+        
         model = build_model(
             cfg.model_name,
             len(cfg.train.label_to_name),
