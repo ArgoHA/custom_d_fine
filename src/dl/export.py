@@ -27,14 +27,6 @@ def prepare_model(cfg, device):
     return model
 
 
-def add_suffix(output_path, dynamic_input: bool, half: bool):
-    if dynamic_input:
-        output_path = f"{output_path}_dynamic"
-    if half:
-        output_path = f"{output_path}_half"
-    return Path(output_path).with_suffix(".onnx")
-
-
 def export_to_onnx(
     model: nn.Module,
     model_path: Path,
@@ -55,9 +47,7 @@ def export_to_onnx(
             dynamic_axes[INPUT_NAME] = {}
         dynamic_axes[INPUT_NAME].update({2: "height", 3: "width"})
 
-    output_path = add_suffix(
-        model_path.parent / model_path.stem, dynamic_input=dynamic_input, half=half
-    )
+    output_path = model_path.with_suffix(".onnx")
     torch.onnx.export(
         model,
         x_test,
@@ -151,32 +141,18 @@ def main(cfg: DictConfig):
     x_test = torch.randn(cfg.export.max_batch_size, 3, *cfg.train.img_size).to(device)
     _ = model(x_test)
 
-    # onnx version
     onnx_path = export_to_onnx(
         model,
         model_path,
         x_test,
         cfg.export.max_batch_size,
-        half=cfg.export.half,
-        dynamic_input=cfg.export.dynamic_input,
+        half=False,
+        dynamic_input=False,
     )
+
     export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
 
-    # static onnx for tensorrt
-    if cfg.export.half or cfg.export.dynamic_input:
-        onnx_path = export_to_onnx(
-            model,
-            model_path,
-            x_test,
-            cfg.export.max_batch_size,
-            False,
-            False,
-        )
-    export_to_tensorrt(
-        onnx_path,
-        cfg.export.half,
-        cfg.export.max_batch_size,
-    )
+    export_to_tensorrt(onnx_path, cfg.export.half, cfg.export.max_batch_size)
 
     logger.info(f"Exports saved to: {model_path.parent}")
 

@@ -204,8 +204,8 @@ def main(cfg: DictConfig):
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
         conf_thresh=conf_thresh,
-        rect=cfg.export.dynamic_input,
-        half=cfg.export.half,
+        rect=False,
+        half=False,
         keep_ratio=cfg.train.keep_ratio,
     )
 
