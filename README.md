@@ -18,6 +18,7 @@ python -m src.dl.bench          # Runs all exported models on the test set
 python -m src.dl.infer          # Runs model ontest folder, saves visualisations and txt preds
 python -m src.dl.check_errors   # Runs model on train and val sets, saves only missmatched boxes with GT
 python -m src.dl.test_batching  # Gets stats to find the optimal batch size for your model and GPU
+python -m src.dl.ov_int8        # Runs int8 accuracy aware quantization for OpenVINO. Can take several hours
 ```
 
 Note: if you don't pass any parameters, you can run any of these scripts with `make script_name`, for exmaple: `make train` will run `python -m src.dl.train`. You can also just run `make` to run `preprocess, split, train, export, bench` scripts as 1 sequence.

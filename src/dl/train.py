@@ -161,27 +161,29 @@ class Trainer:
         with open(self.path_to_save / "config.yaml", "w") as f:
             OmegaConf.save(config=self.cfg, f=f)
 
+    @staticmethod
     def preds_postprocess(
-        self,
-        inputs,
-        outputs,
-        orig_sizes,
-        num_top_queries=300,
-        use_focal_loss=True,
+        inputs: torch.Tensor,
+        outputs: Dict[str, torch.Tensor],
+        orig_sizes: torch.Tensor,
+        num_labels: int,
+        keep_ratio: bool,
+        num_top_queries: int = 300,
+        use_focal_loss: bool = True,
     ) -> List[Dict[str, torch.Tensor]]:
         """
         returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
         """
         logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
         boxes = process_boxes(
-            boxes, inputs.shape[2:], orig_sizes, self.keep_ratio, inputs.device
+            boxes, inputs.shape[2:], orig_sizes, keep_ratio, inputs.device
         )  # B x TopQ x 4
 
         if use_focal_loss:
             scores = torch.sigmoid(logits)
             scores, index = torch.topk(scores.flatten(1), num_top_queries, dim=-1)
-            labels = index - index // self.num_labels * self.num_labels
-            index = index // self.num_labels
+            labels = index - index // num_labels * num_labels
+            index = index // num_labels
             boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
         else:
             scores = F.softmax(logits)[:, :, :-1]
@@ -193,7 +195,7 @@ class Trainer:
                     boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1])
                 )
 
-        results = []
+        results: List[Dict[str, torch.Tensor]] = []
         for lab, box, sco in zip(labels, boxes, scores):
             result = dict(
                 labels=lab.detach().cpu(), boxes=box.detach().cpu(), scores=sco.detach().cpu()
@@ -201,7 +203,8 @@ class Trainer:
             results.append(result)
         return results
 
-    def gt_postprocess(self, inputs, targets, orig_sizes):
+    @staticmethod
+    def gt_postprocess(inputs, targets, orig_sizes, keep_ratio):
         results = []
         for idx, target in enumerate(targets):
             lab = target["labels"]
@@ -209,7 +212,7 @@ class Trainer:
                 target["boxes"][None],
                 inputs[idx].shape[1:],
                 orig_sizes[idx][None],
-                self.keep_ratio,
+                keep_ratio,
                 inputs.device,
             )
             result = dict(labels=lab.detach().cpu(), boxes=box.squeeze(0).detach().cpu())
@@ -249,8 +252,10 @@ class Trainer:
                 torch.stack([t["orig_size"] for t in targets], dim=0).float().to(self.device)
             )
 
-            preds = self.preds_postprocess(inputs, raw_res, orig_sizes)
-            gt = self.gt_postprocess(inputs, targets, orig_sizes)
+            preds = self.preds_postprocess(
+                inputs, raw_res, orig_sizes, self.num_labels, self.keep_ratio
+            )
+            gt = self.gt_postprocess(inputs, targets, orig_sizes, self.keep_ratio)
 
             for pred_instance, gt_instance in zip(preds, gt):
                 all_preds.append(pred_instance)
@@ -476,7 +481,7 @@ def main(cfg: DictConfig) -> None:
     finally:
         logger.info("Evaluating best model...")
         cfg.exp = get_latest_experiment_name(cfg.exp, cfg.train.path_to_save)
-        
+
         model = build_model(
             cfg.model_name,
             len(cfg.train.label_to_name),
