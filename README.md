@@ -1,9 +1,9 @@
-# SoTA Object Detection D-FINE model training, exporting, inferencing pipeline from scratch
+# D-FINE Object Detection Framework (Train, Export, Inference)
 
-This is a custom project to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection transformer based model. Model author's repo: [D-FINE](https://github.com/Peterande/D-FINE).
-This is not a fork, but a complete rewrite from scratch. Only model atchitecture and loss functions were used from original repo.
+This is a framework to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection transformer based model. Model author's repo: [D-FINE](https://github.com/Peterande/D-FINE).
+This is not a fork, but a complete rewrite from scratch. Only model atchitecture and loss functions were used from the original repo.
 
-Check out [the tutorial video](https://youtu.be/_uEyRRw4miY) to get familiar with this pipeline.
+Check out [the video tutorial](https://youtu.be/_uEyRRw4miY) to get familiar with this framework.
 
 ## Main scripts
 
