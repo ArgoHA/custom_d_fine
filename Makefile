@@ -1,4 +1,4 @@
-.PHONY: full train preprocess split export bench infer test_batching check_errors
+.PHONY: full train preprocess split export bench infer test_batching check_errors ov_int8
 
 full:
 	python -m src.etl.preprocess
@@ -30,3 +30,6 @@ test_batching:
 
 check_errors:
 	python -m src.dl.check_errors
+
+ov_int8:
+	python -m src.dl.ov_int8

@@ -39,10 +39,7 @@ class OV_model:
         elif isinstance(conf_thresh, list):
             self.conf_threshs = conf_thresh
 
-        if self.half:
-            self.np_dtype = np.float16
-        else:
-            self.np_dtype = np.float32
+        self.np_dtype = np.float32
 
         self._load_model()
         self._test_pred()
@@ -53,18 +50,18 @@ class OV_model:
 
         if not self.device:
             self.device = "CPU"
-            if "GPU" in core.get_available_devices():
-                if not self.half and not self.rect:
-                    self.device = "GPU"
+            if "GPU" in core.get_available_devices() and not self.rect:
+                self.device = "GPU"
 
         if self.device != "CPU":
             det_ov_model.reshape({"input": [1, 3, *self.input_size]})
 
+        inference_hint = "f16" if self.half else "f32"
         inference_mode = "CUMULATIVE_THROUGHPUT" if self.max_batch_size > 1 else "LATENCY"
         self.model = core.compile_model(
             det_ov_model,
             self.device,
-            config={"PERFORMANCE_HINT": inference_mode},
+            config={"PERFORMANCE_HINT": inference_mode, "INFERENCE_PRECISION_HINT": inference_hint},
         )
         logger.info(f"OpenVino running on {self.device}")
 
@@ -334,3 +331,12 @@ def filter_preds(preds, conf_threshs: List[float]):
         pred["boxes"] = pred["boxes"][mask]
         pred["labels"] = pred["labels"][mask]
     return preds
+
+
+if __name__ == "__main__":
+    model = OV_model(
+        model_path="/Users/argosaakyan/Data/firevision/models/baseline_m_2025-06-23/model.xml",
+        n_outputs=2,
+    )
+    model(np.random.randint(0, 255, size=(1000, 1000, 3), dtype=np.uint8))
+    print("Done")

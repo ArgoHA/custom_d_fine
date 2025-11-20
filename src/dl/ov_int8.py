@@ -118,7 +118,7 @@ def main(cfg: DictConfig):
         return f1_score
 
     # Run quantization with accuracy control
-    max_drop = getattr(cfg.export, "ov_int8_max_drop", 0.03)
+    max_drop = getattr(cfg.export, "ov_int8_max_drop", 0.01)
     subset_size = getattr(cfg.export, "ov_int8_subset_size", 300)
 
     logger.info(

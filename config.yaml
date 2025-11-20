@@ -126,9 +126,10 @@ split:
 
 
 export: # TensorRT must be done on the inference device
-  half: False # torch, tensorrt
+  half: True # torch, tensorrt
   max_batch_size: 1 # torch, tensorrt
   dynamic_input: False # torch, openvino cpu only
+  ov_int8_max_drop: 0.01
 
 
 infer:

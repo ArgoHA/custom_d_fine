@@ -57,12 +57,13 @@ python -m src.dl.export exp_name=my_experiment
 
 ## Exporting tips
 
+TensorRT export must be done on the GPU that you are going to use for inferencing.
+
 Half precision:
 
-- usually makes sense if your hardware was more FLOPs in fp16
-- works best with TensorRT
-- for Torch version, AMP is used when Half flag is true, but if FLOPs are the same for fp32 and fp16 - I see AMP being a little slower during inference.
-- is not used for OpenVINO, as it automatically picks precision. And it is not used for ONNX.
+- usually makes inference faster with minimum accuracy suffering
+- works best with TensorRT and OpenVINO (when running on GPU cores). OpenVINO can be exported ones and then can be inferenced in both fp32 or fp16. Note on Apple Silicon right now OpenVINO version of D-FINE works only in full precision.
+- Not used for ONNX and Torch at the moment.
 
 Dynamic input means that during inference, we cut black paddings from letterbox. I don't recommend using it with D-FINE as accuracy degrades too much (probably because absolute Positional Encoding of patches)
 
@@ -76,6 +77,59 @@ Use inference classes in `src/infer`. Currently available:
 - ONNX
 
 You can run inference on a folder (path_to_test_data) of images or on a folder of videos. Crops will be created automatically. You can control it and paddings from config.yaml in the `infer` section.
+
+## Performace benchmarks
+
+All benchmarks below are on the same **custom dataset** with **D-FINEm** at **640×640**.
+Latency numbers include image preprocessing -> model inference -> postprocessing.
+
+### Desktop: Intel i5-12400F + RTX 5070 Ti
+
+```
+| Format               |   F1 score   | Latency (ms) |
+|----------------------|--------------|--------------|
+| Torch, FP32, GPU     |    0.9161    |    16.6      |
+| TensorRT, FP32, GPU  |    0.9166    |    7.5       |
+| TensorRT, FP16, GPU  |    0.9167    |    5.5       |
+| OpenVINO, FP32, CPU  |    0.9165    |    115.4     |
+| OpenVINO, FP16, CPU  |    0.9165    |    115.4     |
+| OpenVINO, INT8, CPU  |    0.9139    |    44.1      |
+| ONNX, FP32, CPU      |    0.9165    |    150.6     |
+```
+
+**Notes (desktop):**
+
+- TensorRT FP16 gives ~**3x speedup** vs Torch FP32 GPU with **no meaningful F1 drop**.
+- On the CPU, OpenVINO seems to ignore FP16 - it's identical to FP32.
+- OpenVINO INT8 on CPU gives ~**2.6x speedup** vs FP32 with a **small F1 drop** on this particular dataset.
+
+---
+
+### Edge device: Intel N150 (CPU with iGPU cores)
+
+```
+| Format               |   F1 score   | Latency (ms) |
+|----------------------|--------------|--------------|
+| OpenVINO, FP32, iGPU |    0.9165    |     350.8    |
+| OpenVINO, FP16, iGPU |    0.9157    |     209.6    |
+| OpenVINO, INT8, iGPU |    0.9116    |     123.1    |
+| OpenVINO, FP32, CPU  |    0.9165    |     505.2    |
+| OpenVINO, FP16, CPU  |    0.9165    |     505.2    |
+| OpenVINO, INT8, CPU  |    0.9139    |     252.7    |
+```
+
+**Notes (edge / N150):**
+
+- On the iGPU, FP16 and INT8 both give **significant latency reductions** with **minor F1 degradation**.
+- On the CPU, FP16 again seems to be ignored, while INT8 still gives a solid speedup.
+
+### How to interpret these numbers
+
+- FP16 is often a great sweet spot on GPUs: same accuracy, noticeably faster inference.
+- On CPUs, FP16 may or may not be accelerated, depending on the hardware.
+- INT8 can give big speedups on both CPU and GPU, but the accuracy drop is highly data- and model-dependent.
+
+I recommend always benchmarking on your own hardware and dataset.
 
 ## Outputs
 
