@@ -7,7 +7,6 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 from numpy.typing import NDArray
-from torch.amp import autocast
 from torchvision.ops import nms
 
 from src.d_fine.dfine import build_model
@@ -54,10 +53,6 @@ class Torch_model:
             self.device = device
 
         self.np_dtype = np.float32
-        if self.half:
-            self.amp_enabled = True
-        else:
-            self.amp_enabled = False
 
         self._load_model()
         self._test_pred()
@@ -71,7 +66,7 @@ class Torch_model:
         self.model.eval()
         self.model.to(self.device)
 
-        logger.info(f"Torch model, Device: {self.device}, AMP: {self.amp_enabled}")
+        logger.info(f"Torch model, Device: {self.device}")
 
     def _test_pred(self) -> None:
         random_image = np.random.randint(0, 255, size=(1100, 1000, self.channels), dtype=np.uint8)
@@ -210,9 +205,6 @@ class Torch_model:
 
     @torch.no_grad()
     def _predict(self, inputs) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-        if self.amp_enabled:
-            with autocast("cuda"):
-                return self.model(inputs)
         return self.model(inputs)
 
     def _postprocess(
