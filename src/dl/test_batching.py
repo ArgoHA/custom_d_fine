@@ -5,9 +5,8 @@ import cv2
 import hydra
 import numpy as np
 import pandas as pd
-import torch
-from loguru import logger
 from omegaconf import DictConfig
+from tabulate import tabulate
 from tqdm import tqdm
 
 from src.dl.utils import get_latest_experiment_name
@@ -32,8 +31,8 @@ def main(cfg: DictConfig):
     img_folder = Path(cfg.train.data_path) / "images"
     img = cv2.imread(str(img_folder.iterdir().__next__()))
 
-    res = {"bs": [], "full_latency": []}
-    runs = 512
+    res = {"bs": [], "throughput": [], "latency_per_image": []}
+    images = 512
     bss = [1, 2, 4, 8, 16, 32]
 
     for bs in bss:
@@ -43,19 +42,22 @@ def main(cfg: DictConfig):
             imgs = img
 
         t0 = time.perf_counter()
-        for _ in tqdm(range(runs // bs)):
+        for _ in tqdm(range(images // bs), desc=f"Batch size {bs}"):
             _ = torch_model(imgs)
         t1 = time.perf_counter()
 
-        fill_infer = (t1 - t0) * 1000 / runs
+        latency_per_image = (t1 - t0) * 1000 / images
+        throughput = images / (t1 - t0)
 
-        logger.info(f"BS {bs} Full inference {fill_infer:.2f}ms")
-        print()
         res["bs"].append(bs)
-        res["full_latency"].append(fill_infer)
+        res["latency_per_image"].append(latency_per_image)
+        res["throughput"].append(throughput)
 
     df = pd.DataFrame(res)
     df.to_csv(Path(cfg.train.path_to_save) / "batched_infer.csv", index=False)
+
+    tabulated_data = tabulate(df.round(1), headers="keys", tablefmt="pretty", showindex=False)
+    print("\n" + tabulated_data)
 
 
 if __name__ == "__main__":

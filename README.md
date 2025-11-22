@@ -86,8 +86,9 @@ Latency numbers include image preprocessing -> model inference -> postprocessing
 ### Desktop: Intel i5-12400F + RTX 5070 Ti
 
 ```
++----------------------+--------------+--------------+
 | Format               |   F1 score   | Latency (ms) |
-|----------------------|--------------|--------------|
++----------------------+--------------+--------------+
 | Torch, FP32, GPU     |    0.9161    |    16.6      |
 | TensorRT, FP32, GPU  |    0.9166    |    7.5       |
 | TensorRT, FP16, GPU  |    0.9167    |    5.5       |
@@ -95,6 +96,7 @@ Latency numbers include image preprocessing -> model inference -> postprocessing
 | OpenVINO, FP16, CPU  |    0.9165    |    115.4     |
 | OpenVINO, INT8, CPU  |    0.9139    |    44.1      |
 | ONNX, FP32, CPU      |    0.9165    |    150.6     |
++----------------------+--------------+--------------+
 ```
 
 **Notes (desktop):**
@@ -108,14 +110,16 @@ Latency numbers include image preprocessing -> model inference -> postprocessing
 ### Edge device: Intel N150 (CPU with iGPU cores)
 
 ```
++----------------------+--------------+--------------+
 | Format               |   F1 score   | Latency (ms) |
-|----------------------|--------------|--------------|
++----------------------+--------------+--------------+
 | OpenVINO, FP32, iGPU |    0.9165    |     350.8    |
 | OpenVINO, FP16, iGPU |    0.9157    |     209.6    |
 | OpenVINO, INT8, iGPU |    0.9116    |     123.1    |
 | OpenVINO, FP32, CPU  |    0.9165    |     505.2    |
 | OpenVINO, FP16, CPU  |    0.9165    |     505.2    |
 | OpenVINO, INT8, CPU  |    0.9139    |     252.7    |
++----------------------+--------------+--------------+
 ```
 
 **Notes (edge / N150):**
@@ -130,6 +134,23 @@ Latency numbers include image preprocessing -> model inference -> postprocessing
 - INT8 can give big speedups on both CPU and GPU, but the accuracy drop is highly data- and model-dependent.
 
 I recommend always benchmarking on your own hardware and dataset.
+
+## Batched inference
+
+Another thing to check on your hardware and model is batch size when you run batched inference (to get higher throughput, losing overall service latency). For that you can simpli run `make test_batching`, it will run torch model with different batch sizes and calculate **throughput** (proccesed images per second) and **average latency (per image). For example, with Intel i5-12400F + RTX 5070 Ti and D-FINEm, ~4 is the optimal batch size to inference with Torch.
+
+```
++------+------------+-------------------+
+|  bs  | throughput | latency_per_image |
++------+------------+-------------------+
+| 1.0  |    76.4    |       13.1        |
+| 2.0  |   113.4    |        8.8        |
+| 4.0  |   138.1    |        7.2        |
+| 8.0  |   122.7    |        8.1        |
+| 16.0 |   119.7    |        8.4        |
+| 32.0 |   117.8    |        8.5        |
++------+------------+-------------------+
+```
 
 ## Outputs
 
