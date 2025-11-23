@@ -55,6 +55,14 @@ python -m src.dl.train exp_name=my_experiment
 python -m src.dl.export exp_name=my_experiment
 ```
 
+### Train using DDP
+If you have multi-gpu hardware, DDP can help train faster. To toggle it, set `ddp` to `True` in config.yaml and use
+```console
+torchrun --nproc_per_node=auto --master_port=29500 -m src.dl.train
+```
+It is advised to set `num_workers` as `total logical cpu cores / total gpu cards` for max thoughput.
+
+
 ## Exporting tips
 
 TensorRT export must be done on the GPU that you are going to use for inferencing.

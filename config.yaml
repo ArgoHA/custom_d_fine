@@ -22,6 +22,7 @@ train:
 
   ### Configs ###
   use_wandb: True
+  ddp: True # toggled using CLI 
   device: cuda
   label_to_name: # dataset's classes
     0: pedestrian

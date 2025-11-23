@@ -2,6 +2,8 @@ from typing import Dict
 
 import torch
 from loguru import logger
+from collections import OrderedDict
+from src.dl.utils import is_main_process
 
 obj365_ids = [
     0,
@@ -166,6 +168,13 @@ def load_tuning_state(model, path: str):
     else:
         pretrain_state_dict = state
 
+    # strip 'module.' prefix from DDP models
+    new_state_dict = OrderedDict()
+    for k, v in pretrain_state_dict.items():
+        name = k[7:] if k.startswith('module.') else k # remove `module.`
+        new_state_dict[name] = v
+    pretrain_state_dict = new_state_dict
+
     # Adjust head parameters between datasets
     try:
         adjusted_state_dict = adjust_head_parameters(model.state_dict(), pretrain_state_dict)
@@ -174,5 +183,6 @@ def load_tuning_state(model, path: str):
         stat, infos = matched_state(model.state_dict(), pretrain_state_dict)
 
     model.load_state_dict(stat, strict=False)
-    logger.info(f"Pretrained weigts from {path}, {infos}")
+    if is_main_process():
+        logger.info(f"Pretrained weigts from {path}, {infos}")
     return model
