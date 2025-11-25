@@ -428,9 +428,9 @@ class HybridEncoder(nn.Module):
         grid_w = torch.arange(int(w), dtype=torch.float32)
         grid_h = torch.arange(int(h), dtype=torch.float32)
         grid_w, grid_h = torch.meshgrid(grid_w, grid_h, indexing="ij")
-        assert (
-            embed_dim % 4 == 0
-        ), "Embed dimension must be divisible by 4 for 2D sin-cos position embedding"
+        assert embed_dim % 4 == 0, (
+            "Embed dimension must be divisible by 4 for 2D sin-cos position embedding"
+        )
         pos_dim = embed_dim // 4
         omega = torch.arange(pos_dim, dtype=torch.float32) / pos_dim
         omega = 1.0 / (temperature**omega)
@@ -483,4 +483,4 @@ class HybridEncoder(nn.Module):
             out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1))
             outs.append(out)
 
-        return outs
+        return outs, inner_outs

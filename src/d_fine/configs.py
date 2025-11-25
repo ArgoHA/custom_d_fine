@@ -29,8 +29,8 @@ base_cfg = {
             "loss_giou": 2,
             "loss_fgl": 0.15,
             "loss_ddf": 1.5,
-            "loss_mask_bce": 1,  # only for mask head
-            "loss_mask_dice": 1,  # only for mask head
+            "loss_mask_bce": 10,  # only for mask head
+            "loss_mask_dice": 10,  # only for mask head
         },
         "losses": ["vfl", "boxes", "local"],  #  "masks" will be added if training with segment task
         "alpha": 0.75,

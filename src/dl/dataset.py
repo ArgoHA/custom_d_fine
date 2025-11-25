@@ -443,6 +443,9 @@ class Loader:
                 )
             else:
                 self.splits[split_name] = []
+        assert len(self.splits["train"]) and len(self.splits["val"]), (
+            "Train and Val splits must be present"
+        )
 
     def _get_label_stats(self) -> Dict:
         if self.use_one_class:

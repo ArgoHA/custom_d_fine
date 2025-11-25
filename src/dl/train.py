@@ -72,14 +72,14 @@ class Trainer:
         self.num_labels = len(cfg.train.label_to_name)
         self.task = cfg.task  # detect/segment
 
-        self.target_metrics = ["mAP_50", "f1"]
-        enable_mask_head = self.task == "segment"
-        if enable_mask_head:
-            self.target_metrics += ["iou"]
-
         self.debug_img_path = Path(self.cfg.train.debug_img_path)
         self.eval_preds_path = Path(self.cfg.train.eval_preds_path)
         self.init_dirs()
+
+        self.decision_metrics = ["iou", "f1"]
+        enable_mask_head = self.task == "segment"
+        if enable_mask_head:
+            self.decision_metrics += ["iou"]
 
         if self.use_wandb:
             wandb.init(
@@ -401,7 +401,7 @@ class Trainer:
         self.path_to_save.mkdir(parents=True, exist_ok=True)
         torch.save(model_to_save.state_dict(), self.path_to_save / "last.pt")
 
-        decision_metric = (metrics["mAP_50"] + metrics["f1"]) / 2
+        decision_metric = (metrics["iou"] + metrics["f1"]) / 2
         if decision_metric > best_metric:
             best_metric = decision_metric
             logger.info("Saving new best model🔥")
@@ -472,6 +472,7 @@ class Trainer:
                             output = self.model(inputs, targets=targets)
                         with autocast(self.device, enabled=False):
                             loss_dict = self.loss_fn(output, targets)
+                        mask_losses = (loss_dict["loss_mask_bce"], loss_dict["loss_mask_dice"])
                         loss = sum(loss_dict.values()) / self.b_accum_steps
                         self.scaler.scale(loss).backward()
 

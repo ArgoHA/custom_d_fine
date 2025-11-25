@@ -58,7 +58,6 @@ class Validator:
             metrics["mAP_50_mask"] = tm_mask["map_50"].item()
             metrics["mAP_50_95_mask"] = tm_mask["map"].item()
 
-        print(metrics)
         if not extended:
             metrics.pop("extended_metrics", None)
         return metrics

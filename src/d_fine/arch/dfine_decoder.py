@@ -313,36 +313,15 @@ class LQE(nn.Module):
         return scores + quality_score
 
 
-class PixelDecoder(nn.Module):
-    """
-    Build a ~1/4 scale mask feature from backbone feats.
-    Expects feats[-1] the highest-res (smallest stride) feature.
-    """
-
-    def __init__(self, in_chs, out_ch=256):
-        super().__init__()
-        # Project each level to out_ch, then upsample and fuse to 1/4
-        self.proj = nn.ModuleList([nn.Conv2d(c, out_ch, 1, bias=False) for c in in_chs])
-        self.bn = nn.ModuleList([nn.BatchNorm2d(out_ch) for _ in in_chs])
-        self.smooth = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
-
-    def forward(self, feats):
-        # feats: list of [B,C,H_l,W_l] ordered by increasing stride (s8, s16, s32)
-        xs = [bn(p(f)) for f, p, bn in zip(feats, self.proj, self.bn)]
-        # upsample to the highest spatial resolution among inputs (feats[0] if that’s s8)
-        ref_h, ref_w = xs[0].shape[-2:]
-        x = xs[0]
-        for t in xs[1:]:
-            x = x + F.interpolate(t, size=(ref_h, ref_w), mode="bilinear", align_corners=False)
-        x = self.smooth(x)
-        return x  # [B, out_ch, H/stride_min, W/stride_min]
-
-
 class MaskPixelDecoder(nn.Module):
     """
     Build a 1/4-scale mask feature from backbone (C2-C5) and (optionally) an 'encoder' map.
     feats: [C2(s4), C3(s8), C4(s16), C5(s32)]
     Optional 'enc' is a (B,C,H8,W8) feature akin to Ce (stride 8) which we upsample 2x.
+
+    Default configs use 8 as a smallest stride, so in fact it's 1/8 scale.
+
+    Try upconv to 1/2 of original scale?
     """
 
     def __init__(self, in_chs, out_ch=256, use_enc=True):
@@ -357,15 +336,13 @@ class MaskPixelDecoder(nn.Module):
         # optional encoder projection T(.) to hidden dim (out_ch)
         if use_enc:
             self.enc_proj = nn.Conv2d(
-                out_ch, out_ch, 1, bias=False
+                in_chs[0], out_ch, 1, bias=False
             )  # expects enc already in out_ch or hidden_dim
             self.enc_bn = nn.BatchNorm2d(out_ch)
 
-        # small FPN-ish smoothing stack at 1/4
-        self.smooth1 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+        # upconv to 1/2
+        self.upconv = nn.ConvTranspose2d(out_ch, out_ch, kernel_size=2, stride=2, bias=False)
         self.bn1 = nn.BatchNorm2d(out_ch)
-        self.smooth2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_ch)
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, feats, enc_feat_1_8=None):
@@ -378,16 +355,15 @@ class MaskPixelDecoder(nn.Module):
             t = self.bn[i](self.lateral[i](feats[i]))
             x = x + F.interpolate(t, size=c2.shape[-2:], mode="bilinear", align_corners=False)
 
-        # add encoder feature (stride 8) upsampled 2× → stride 4
+        # add encoder feature (stride 8) upsampled 2x -> stride 4
         if self.use_enc and enc_feat_1_8 is not None:
             e = self.enc_bn(self.enc_proj(enc_feat_1_8))
             e = F.interpolate(e, size=c2.shape[-2:], mode="bilinear", align_corners=False)
             x = x + e
 
-        # a bit more capacity helps mask crispness
-        x = self.act(self.bn1(self.smooth1(x)))
-        x = self.act(self.bn2(self.smooth2(x)))
-        return x  # (B, out_ch, H/4, W/4)
+        # upconv
+        x = self.act(self.bn1(self.upconv(x)))
+        return x  # (B, out_ch, H/2, W/2)
 
 
 class TransformerDecoder(nn.Module):
@@ -948,7 +924,9 @@ class DFINETransformer(nn.Module):
         # einsum: (B,Q,C) x (B,C,H,W) -> (B,Q,H,W)
         return torch.einsum("bqc,bchw->bqhw", mask_embed, mask_feat)
 
-    def forward(self, feats, targets=None):
+    def forward(self, all_feats, targets=None):
+        feats = all_feats[0]
+        inner_feats = all_feats[1]
         do_masks = self._should_do_masks(targets)
         # input projection and embedding
         memory, spatial_shapes = self._get_encoder_input(feats)
@@ -999,17 +977,17 @@ class DFINETransformer(nn.Module):
             dn_out_refs, out_refs = torch.split(out_refs, dn_meta["dn_num_split"], dim=2)
 
         # segmentation
-        pred_masks = None
-        aux_masks = None
-        B = feats[0].shape[0]
-        C = self.hidden_dim
-        lvl0_h, lvl0_w = spatial_shapes[0]
-        lvl0_len = lvl0_h * lvl0_w
-
-        mem0 = memory[:, :lvl0_len, :]  # (B, H8*W8, C)
-        mem0 = mem0.permute(0, 2, 1).reshape(B, C, lvl0_h, lvl0_w)  # (B,C,H8,W8)
         if do_masks:
-            mask_feat = self.pixel_decoder(feats, enc_feat_1_8=mem0)
+            pred_masks = None
+            aux_masks = None
+            B = inner_feats[0].shape[0]
+            C = self.hidden_dim
+            lvl0_h, lvl0_w = spatial_shapes[0]
+            lvl0_len = lvl0_h * lvl0_w
+
+            mem0 = memory[:, :lvl0_len, :]  # (B, H8*W8, C)
+            mem0 = mem0.permute(0, 2, 1).reshape(B, C, lvl0_h, lvl0_w)  # (B,C,H8,W8)
+            mask_feat = self.pixel_decoder(inner_feats, enc_feat_1_8=mem0)
             pred_masks = self._mask_logits_from_h(hs[-1], mask_feat)  # logits
             aux_masks = [
                 self._mask_logits_from_h(h, mask_feat) for h in hs[:-1]
