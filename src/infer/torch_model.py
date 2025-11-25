@@ -1,4 +1,3 @@
-import time
 from typing import Dict, List, Tuple
 
 import cv2

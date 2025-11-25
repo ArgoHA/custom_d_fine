@@ -244,6 +244,7 @@ def main(cfg: DictConfig) -> None:
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
+        use_nms=True,  # to remove duplocated boxes on 1 GT object and not show them as FPs
     )
     base_loader = Loader(
         root_path=Path(cfg.train.data_path),
