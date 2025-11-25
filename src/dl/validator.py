@@ -10,7 +10,7 @@ from loguru import logger
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision.ops import box_iou
 
-from src.dl.utils import filter_preds
+from src.dl.utils import filter_preds, is_main_process
 
 
 class Validator:
@@ -35,7 +35,34 @@ class Validator:
         self.thresholds = np.arange(0.2, 1.0, 0.05)
         self.label_to_name = label_to_name
 
-        self.torch_metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+        # For DDP: must use CUDA tensors for proper NCCL sync
+        # CPU tensors cannot be synced with NCCL backend
+        import torch.distributed as dist
+        is_ddp = dist.is_initialized() and torch.cuda.is_available()
+        
+        # Move tensors to CUDA if using DDP (they come from CPU after postprocessing)
+        if is_ddp:
+            device = torch.device(f"cuda:{dist.get_rank()}")
+            # Move preds and gt to CUDA
+            preds_cuda = []
+            gt_cuda = []
+            for pred in preds:
+                pred_cuda = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                            for k, v in pred.items()}
+                preds_cuda.append(pred_cuda)
+            for gt_item in gt:
+                gt_cuda_item = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                               for k, v in gt_item.items()}
+                gt_cuda.append(gt_cuda_item)
+            preds = preds_cuda
+            gt = gt_cuda
+        
+        self.torch_metric = MeanAveragePrecision(box_format="xyxy", 
+                                                iou_type="bbox", 
+                                                compute_on_cpu=not is_ddp,  # Use CPU only if not DDP
+                                                sync_on_compute=is_ddp,  # Enable sync with DDP
+                                                dist_sync_on_step=is_ddp,  # Enable DDP sync
+                                                )
         self.torch_metric.warn_on_many_detections = False
         self.torch_metric.update(preds, gt)
         self.conf_matrix = None
@@ -273,6 +300,9 @@ class Validator:
         return metrics_per_class, conf_matrix, class_to_idx
 
     def save_plots(self, path_to_save) -> None:
+        if not is_main_process():
+            return
+            
         path_to_save = Path(path_to_save)
         path_to_save.mkdir(parents=True, exist_ok=True)
 

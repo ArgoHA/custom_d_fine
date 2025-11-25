@@ -1,0 +1,134 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+# temp exp files [this section is to be removed at last]
+popo.md
+run.sh
+delete
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Pytype
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Local envs
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Data, logs, outputs, results
+logs/
+log/
+*.log
+output/
+outputs/
+result/
+results/
+*.results
+*.out
+*.tmp
+*.dat
+*.pth
+*.ckpt
+*.pt
+*.h5
+*.onnx
+*.npz
+*.npy
+
+# Ignore all results (recursive)
+results/
+outputs/ 
+*.txt
+*uae_1hr_evaluation*
+
+# Ignore experiment folders
+experiments/
+runs/
+checkpoints/
+weights/
+models/
+saved_models/
+snapshots/
+pretrained/
+
+# Ignore datasets
+data/
+dataset/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+
+# Ignore wandb logs
+wandb/
+wandb-debug.log
+wandb/latest-run/
+
+# Ignore Mac and system files
+.DS_Store
+Thumbs.db

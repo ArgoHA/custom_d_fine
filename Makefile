@@ -1,4 +1,4 @@
-.PHONY: full train preprocess split export bench infer test_batching check_errors ov_int8
+.PHONY: full train train_ddp preprocess split export bench infer test_batching check_errors
 
 full:
 	python -m src.etl.preprocess
@@ -15,6 +15,9 @@ split:
 
 train:
 	python -m src.dl.train
+
+train_ddp:
+	torchrun --nproc_per_node=auto --master_port=29500 -m src.dl.train
 
 export:
 	python -m src.dl.export

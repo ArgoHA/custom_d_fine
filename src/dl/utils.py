@@ -12,17 +12,19 @@ import numpy as np
 import pandas as pd
 import torch
 import wandb
+import torch.distributed as dist
 from albumentations.core.transforms_interface import DualTransform
 from loguru import logger
 from tabulate import tabulate
 
 
 def set_seeds(seed: int, cudnn_fixed: bool = False) -> None:
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    seed_with_rank = seed + get_rank()
+    torch.manual_seed(seed_with_rank)
+    np.random.seed(seed_with_rank)
+    random.seed(seed_with_rank)
+    torch.cuda.manual_seed(seed_with_rank)
+    torch.cuda.manual_seed_all(seed_with_rank)
 
     if cudnn_fixed:
         torch.backends.cudnn.deterministic = True
@@ -38,6 +40,8 @@ def seed_worker(worker_id):  # noqa
 
 
 def wandb_logger(loss, metrics: Dict[str, float], epoch, mode: str) -> None:
+    if not is_main_process():
+        return
     log_data = {"epoch": epoch}
     if loss:
         log_data[f"{mode}/loss/"] = loss
@@ -70,6 +74,9 @@ def rename_metric_keys(d, label_to_name):
 def log_metrics_locally(
     all_metrics: Dict[str, Dict[str, float]], path_to_save: Path, epoch: int, extended=False
 ) -> None:
+    if not is_main_process():
+        return
+
     metrics_df = pd.DataFrame.from_dict(all_metrics, orient="index")
     metrics_df = metrics_df.round(4)
     if extended:
@@ -95,6 +102,9 @@ def log_metrics_locally(
 
 
 def save_metrics(train_metrics, metrics, loss, epoch, path_to_save, use_wandb) -> None:
+    if not is_main_process():
+        return
+
     log_metrics_locally(
         all_metrics={"train": train_metrics, "val": metrics}, path_to_save=path_to_save, epoch=epoch
     )
@@ -366,6 +376,9 @@ def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
       - Green bboxes for GT
       - Blue bboxes for preds
     """
+    if not is_main_process():
+        return
+        
     path_to_save.mkdir(parents=True, exist_ok=True)
 
     for gt_dict, pred_dict, img_path in zip(gt, preds, img_paths):
@@ -670,3 +683,43 @@ class LetterboxRect(DualTransform):
             b = np.concatenate([b, extra], axis=1)
 
         return b
+
+def setup_ddp():
+    """
+    Initializes the DDP process group
+    """
+    num_gpus = torch.accelerator.device_count()
+    assert num_gpus >= 2, f"DDP requires >= 2 GPUs but got {num_gpus}"
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    rank = int(os.environ.get("RANK", 0))
+
+    if world_size > 1:
+        if not torch.cuda.is_available():
+            raise RuntimeError("DDP requires CUDA devices but none were found.")
+        if world_size > num_gpus:
+            raise ValueError(f"World size {world_size} exceeds available GPUs ({num_gpus}).")
+
+        dist.init_process_group(backend="nccl", init_method="env://")
+        # Pin this process to its local GPU
+        torch.cuda.set_device(local_rank)
+
+    return rank, local_rank, world_size
+
+def get_rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+def is_main_process() -> bool:
+    """
+    Checks if the current process is rank 0 
+    """
+    return get_rank() == 0
+
+def cleanup_ddp() -> bool:
+    """
+    Destroys process group
+    """
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()

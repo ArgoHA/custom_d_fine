@@ -11,6 +11,8 @@ from albumentations.pytorch import ToTensorV2
 from loguru import logger
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler 
 
 from src.dl.utils import (
     LetterboxRect,
@@ -20,6 +22,7 @@ from src.dl.utils import (
     random_affine,
     seed_worker,
     vis_one_box,
+    is_main_process,
 )
 
 
@@ -51,6 +54,7 @@ class CustomDataset(Dataset):
         self.keep_ratio = cfg.train.keep_ratio
         self.use_one_class = cfg.train.use_one_class
         self.cases_to_debug = 20
+        self.max_background_resamples = 10
 
         self._init_augs(cfg)
 
@@ -159,8 +163,10 @@ class CustomDataset(Dataset):
         """
         # Get image
         image_path = Path(self.split.iloc[idx].values[0])
-        image = cv2.imread(str(self.root_path / "images" / f"{image_path}"))  # BGR, HWC
-        assert image is not None, f"Image wasn't loaded: {image_path}"
+        full_path = self.root_path / "images" / f"{image_path}"
+        image = cv2.imread(str(full_path))  # BGR, HWC
+        if image is None:
+            raise ValueError(f"Image wasn't loaded: {full_path}")
 
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # RGB, HWC
         height, width, _ = image.shape
@@ -253,36 +259,71 @@ class CustomDataset(Dataset):
         self.mosaic_prob = 0.0
         logger.info("Closing mosaic")
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        image_path = Path(self.split.iloc[idx].values[0])
-        if random.random() < self.mosaic_prob:
-            image, labels, boxes, orig_size = self._load_mosaic(idx)
-        else:
-            image, targets, orig_size = self._get_data(idx)  # boxes in abs xyxy format
-
-            if self.ignore_background and np.all(targets == 0) and self.mode == "train":
-                return None
-
-            box_heights = targets[:, 3] - targets[:, 1]
-            box_widths = targets[:, 4] - targets[:, 2]
-            targets = targets[np.minimum(box_heights, box_widths) > 0]
-
-            # Apply transformations
-            transformed = self.transform(
-                image=image, bboxes=targets[:, 1:], class_labels=targets[:, 0]
-            )
-            image = transformed["image"]  # RGB, CHW
-            boxes = torch.tensor(transformed["bboxes"], dtype=torch.float32)
-            labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
-
-        if self.debug_img_processing and idx <= self.cases_to_debug:
-            self._debug_image(idx, image, boxes, labels, image_path)
-
-        # return back to normalized format for model
-        boxes = torch.tensor(
-            abs_xyxy_to_norm_xywh(boxes, image.shape[1], image.shape[2]), dtype=torch.float32
+    def _should_resample_background(self, targets: np.ndarray) -> bool:
+        return (
+            self.ignore_background
+            and self.mode == "train"
+            and targets.size
+            and np.all(targets[:, 1:] == 0)
         )
-        return image, labels, boxes, image_path, orig_size
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get item with error handling to prevent worker crashes in DDP
+        """
+        max_retries = 10
+        for retry in range(max_retries):
+            try:
+                image_path = Path(self.split.iloc[idx].values[0])
+                attempts = 0
+                while True:
+                    if self.mode == "train" and random.random() < self.mosaic_prob:
+                        image, labels, boxes, orig_size = self._load_mosaic(idx)
+                        break
+
+                    image, targets, orig_size = self._get_data(idx)  # boxes in abs xyxy format
+
+                    if self._should_resample_background(targets):
+                        attempts += 1
+                        if attempts < self.max_background_resamples:
+                            idx = (idx + attempts) % len(self)
+                            image_path = Path(self.split.iloc[idx].values[0])
+                            continue
+
+                    box_heights = targets[:, 3] - targets[:, 1]
+                    box_widths = targets[:, 4] - targets[:, 2]
+                    targets = targets[np.minimum(box_heights, box_widths) > 0]
+
+                    # Apply transformations
+                    transformed = self.transform(
+                        image=image, bboxes=targets[:, 1:], class_labels=targets[:, 0]
+                    )
+                    image = transformed["image"]  # RGB, CHW
+                    boxes = torch.tensor(transformed["bboxes"], dtype=torch.float32)
+                    labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
+                    break
+
+                if self.debug_img_processing and idx <= self.cases_to_debug:
+                    self._debug_image(idx, image, boxes, labels, image_path)
+
+                # return back to normalized format for model
+                boxes = torch.tensor(
+                    abs_xyxy_to_norm_xywh(boxes, image.shape[1], image.shape[2]), dtype=torch.float32
+                )
+                return image, labels, boxes, image_path, orig_size
+            except Exception as e:
+                if retry == max_retries - 1:
+                    # last retry failed, return a dummy sample to prevent crash
+                    logger.error(f"Failed to load sample {idx} after {max_retries} retries: {e}. Using dummy image.")
+                    # return a dummy sample (black image with no boxes)
+                    dummy_image = torch.zeros((3, self.target_h, self.target_w), dtype=torch.float32)
+                    dummy_labels = torch.zeros((0,), dtype=torch.int64)
+                    dummy_boxes = torch.zeros((0, 4), dtype=torch.float32)
+                    dummy_path = Path("dummy")
+                    dummy_orig_size = torch.tensor([self.target_h, self.target_w])
+                    return dummy_image, dummy_labels, dummy_boxes, dummy_path, dummy_orig_size
+                # try next index
+                idx = (idx + 1) % len(self)
 
     def __len__(self):
         return len(self.split)
@@ -365,7 +406,7 @@ class Loader:
         images = images.intersection(split_images)
         return len(images - labels)
 
-    def _build_dataloader_impl(self, dataset: Dataset, shuffle: bool = False) -> DataLoader:
+    def _build_dataloader_impl(self, dataset: Dataset, shuffle: bool = False, sampler=None) -> DataLoader:
         collate_fn = self.val_collate_fn
         if dataset.mode == "train":
             collate_fn = self.train_collate_fn
@@ -375,6 +416,7 @@ class Loader:
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             shuffle=shuffle,
+            sampler=sampler,
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
             prefetch_factor=4,
@@ -400,8 +442,11 @@ class Loader:
             cfg=self.cfg,
         )
 
-        train_loader = self._build_dataloader_impl(train_ds, shuffle=True)
-        val_loader = self._build_dataloader_impl(val_ds)
+        train_sampler = DistributedSampler(train_ds, shuffle=True) if dist.is_initialized() else None
+        val_sampler = DistributedSampler(val_ds, shuffle=False) if dist.is_initialized() else None
+
+        train_loader = self._build_dataloader_impl(train_ds, shuffle=(train_sampler is None), sampler=train_sampler)
+        val_loader = self._build_dataloader_impl(val_ds, sampler=val_sampler)
 
         test_loader = None
         test_ds = []
@@ -414,14 +459,17 @@ class Loader:
                 mode="test",
                 cfg=self.cfg,
             )
-            test_loader = self._build_dataloader_impl(test_ds)
+            test_sampler = DistributedSampler(test_ds, shuffle=False) if dist.is_initialized() else None
+            test_loader = self._build_dataloader_impl(test_ds, sampler=test_sampler)
 
-        logger.info(f"Images in train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
-        obj_stats = self._get_label_stats()
-        logger.info(
-            f"Objects count: {', '.join(f'{key}: {value}' for key, value in obj_stats.items())}"
-        )
-        logger.info(f"Background images: {self._get_amount_of_background()}")
+        if is_main_process():
+            logger.info(f"Images in train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
+            obj_stats = self._get_label_stats()
+            logger.info(
+                f"Objects count: {', '.join(f'{key}: {value}' for key, value in obj_stats.items())}"
+            )
+            logger.info(f"Background images: {self._get_amount_of_background()}")
+
         return train_loader, val_loader, test_loader
 
     def _collate_fn(self, batch) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
