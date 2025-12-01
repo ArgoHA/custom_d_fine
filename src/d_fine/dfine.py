@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 
 import torch.nn as nn
@@ -48,7 +49,7 @@ class DFINE(nn.Module):
 
 
 def build_model(model_name, num_classes, device, img_size=None, pretrained_model_path=None):
-    model_cfg = models[model_name]
+    model_cfg = deepcopy(models[model_name])
     model_cfg["HybridEncoder"]["eval_spatial_size"] = img_size
     model_cfg["DFINETransformer"]["eval_spatial_size"] = img_size
 

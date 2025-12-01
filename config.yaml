@@ -37,6 +37,11 @@ train:
 
   use_one_class: False
 
+  ### Distributed Training (DDP) ###
+  ddp:
+    enabled: False  # set to true to use multi-GPU
+    n_gpus: 2  # how many GPUs / processes per node for torchrun
+
   decision_metrics:
   - f1
   - mAP_50
