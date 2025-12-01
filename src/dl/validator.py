@@ -35,7 +35,9 @@ class Validator:
         self.thresholds = np.arange(0.2, 1.0, 0.05)
         self.label_to_name = label_to_name
 
-        self.torch_metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+        self.torch_metric = MeanAveragePrecision(
+            box_format="xyxy", iou_type="bbox", sync_on_compute=False
+        )
         self.torch_metric.warn_on_many_detections = False
         self.torch_metric.update(preds, gt)
         self.conf_matrix = None

@@ -3,7 +3,7 @@
 full:
 	python -m src.etl.preprocess
 	python -m src.etl.split
-	python -m src.dl.train
+	@$(MAKE) train
 	python -m src.dl.export
 	python -m src.dl.bench
 
@@ -14,7 +14,15 @@ split:
 	python -m src.etl.split
 
 train:
-	python -m src.dl.train
+	@DDP_ENABLED=$$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); print(cfg.get('train', {}).get('ddp', {}).get('enabled', False))" 2>/dev/null || echo "False"); \
+	if [ "$$DDP_ENABLED" = "True" ] || [ "$$DDP_ENABLED" = "true" ]; then \
+		NUM_GPUS=$$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); print(cfg.get('train', {}).get('ddp', {}).get('n_gpus', 2))" 2>/dev/null || echo "2"); \
+		echo "🚀 Training with DDP using $$NUM_GPUS GPUs..."; \
+		torchrun --nproc_per_node=$$NUM_GPUS --master_port=29500 -m src.dl.train; \
+	else \
+		echo "🔧 Training with single GPU..."; \
+		python -m src.dl.train; \
+	fi
 
 export:
 	python -m src.dl.export

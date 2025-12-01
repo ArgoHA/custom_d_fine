@@ -10,18 +10,20 @@ Check out [the video tutorial](https://youtu.be/_uEyRRw4miY) to get familiar wit
 To run the scripts, use the following commands:
 
 ```bash
-python -m src.etl.preprocess    # Converts images and PDFs to JPG format
-python -m src.etl.split         # Creates train, validation, and test CSVs with image paths
-python -m src.dl.train          # Runs the training pipeline
-python -m src.dl.export         # Exports weights in various formats after training
-python -m src.dl.bench          # Runs all exported models on the test set
-python -m src.dl.infer          # Runs model ontest folder, saves visualisations and txt preds
-python -m src.dl.check_errors   # Runs model on train and val sets, saves only missmatched boxes with GT
-python -m src.dl.test_batching  # Gets stats to find the optimal batch size for your model and GPU
-python -m src.dl.ov_int8        # Runs int8 accuracy aware quantization for OpenVINO. Can take several hours
+make preprocess     # Converts images to JPG format. You don't have to use this.
+make split          # Creates train, validation, and test CSVs with image paths
+make train          # Runs the training pipeline, including DDP version
+make export         # Exports weights in various formats after training
+make bench          # Runs all exported models on the test set
+make infer          # Runs model ontest folder, saves visualisations and txt preds
+make check_errors   # Runs model on train and val sets, saves only missmatched boxes with GT
+make test_batching  # Gets stats to find the optimal batch size for your model and GPU
+make ov_int8        # Runs int8 accuracy aware quantization for OpenVINO. Can take several hours
 ```
 
-Note: if you don't pass any parameters, you can run any of these scripts with `make script_name`, for exmaple: `make train` will run `python -m src.dl.train`. You can also just run `make` to run `preprocess, split, train, export, bench` scripts as 1 sequence.
+Note: if you want to pass parameters, you can run any of these scripts with `python -m src.dl script_name` (use `etl` instead of `dl` for `preprocess` and `split`), You can also just run `make` to run `preprocess, split, train, export, bench` scripts as 1 sequence.
+
+For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and run `make train` as usual.
 
 ## Usage example
 
@@ -191,6 +193,7 @@ Another thing to check on your hardware and model is batch size when you run bat
 - Augs based on the [albumentations](https://albumentations.ai) lib
 - Mosaic augmentation, multiscale aug
 - Metrics: mAPs, Precision, Recall, F1-score, Confusion matrix, IoU, plots
+- Distributed Data Parallel (DDP) training
 - After training is done - runs a test to calculate the optimal conf threshold
 - Exponential moving average model
 - Batch accumulation
@@ -214,7 +217,6 @@ Another thing to check on your hardware and model is batch size when you run bat
 
 - Finetune with layers freeze
 - Add support for cashing in dataset
-- Add support for multi GPU training
 - Instance segmentation
 - Smart dataset preprocessing. Detect small objects. Detect near duplicates (remove from val/test)
 
