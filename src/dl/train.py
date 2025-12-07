@@ -71,15 +71,15 @@ class Trainer:
         self.label_to_name = cfg.train.label_to_name
         self.num_labels = len(cfg.train.label_to_name)
         self.task = cfg.task  # detect/segment
+        enable_mask_head = self.task == "segment"
 
         self.debug_img_path = Path(self.cfg.train.debug_img_path)
         self.eval_preds_path = Path(self.cfg.train.eval_preds_path)
         self.init_dirs()
 
-        self.decision_metrics = ["iou", "f1"]
-        enable_mask_head = self.task == "segment"
-        if enable_mask_head:
-            self.decision_metrics += ["iou"]
+        self.decision_metrics = cfg.train.decision_metrics
+        if enable_mask_head and "iou" not in self.decision_metrics:
+            self.decision_metrics.append("iou")
 
         if self.use_wandb:
             wandb.init(
@@ -400,7 +400,9 @@ class Trainer:
         self.path_to_save.mkdir(parents=True, exist_ok=True)
         torch.save(model_to_save.state_dict(), self.path_to_save / "last.pt")
 
-        decision_metric = (metrics["iou"] + metrics["f1"]) / 2
+        # mean from chosen metrics
+        decision_metric = np.mean([metrics[metric_name] for metric_name in self.decision_metrics])
+
         if decision_metric > best_metric:
             best_metric = decision_metric
             logger.info("Saving new best model🔥")
