@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 import onnxruntime as ort
+import torch
 from numpy.typing import NDArray
 
 
@@ -36,7 +37,7 @@ class ONNX_model:
 
         # pick execution provider
         self.device = device or "cpu"
-        self.np_dtype = np.float16 if self.half else np.float32
+        self.np_dtype = np.float32
 
         self._load_model()
         self._test_pred()  # sanity check that shapes line up
@@ -74,57 +75,61 @@ class ONNX_model:
             else:
                 abs_xyxy = scale_boxes(abs_xyxy, orig_sizes[b], proc_sizes[b])
             out[b] = abs_xyxy
+        return torch.from_numpy(out)
+
+    @staticmethod
+    def process_masks(
+        pred_masks,  # Tensor [B, Q, Hm, Wm] or [Q, Hm, Wm]
+        processed_size,  # (H, W) of network input (after your A.Compose)
+        orig_sizes,  # Tensor [B, 2] (H, W)
+        keep_ratio: bool,
+    ) -> List[torch.Tensor]:
+        """
+        Returns list of length B with masks resized to original image sizes:
+        Each item: Float Tensor [Q, H_orig, W_orig] in [0,1] (no thresholding here).
+        - Handles letterbox padding removal if keep_ratio=True.
+        - Works for both batched and single-image inputs.
+        """
+        single = pred_masks.dim() == 3  # [Q,Hm,Wm]
+        if single:
+            pred_masks = pred_masks.unsqueeze(0)  # -> [1,Q,Hm,Wm]
+
+        B, Q, Hm, Wm = pred_masks.shape
+        device = pred_masks.device
+        dtype = pred_masks.dtype
+
+        # 1) Upsample masks to processed (input) size
+        proc_h, proc_w = int(processed_size[0]), int(processed_size[1])
+        masks_proc = torch.nn.functional.interpolate(
+            pred_masks, size=(proc_h, proc_w), mode="bilinear", align_corners=False
+        )  # [B,Q,Hp,Wp] with Hp=proc_h, Wp=proc_w
+
+        out = []
+        for b in range(B):
+            H0, W0 = int(orig_sizes[b, 0].item()), int(orig_sizes[b, 1].item())
+            m = masks_proc[b]  # [Q, Hp, Wp]
+            if keep_ratio:
+                # Compute same gain/pad as in scale_boxes_ratio_kept
+                gain = min(proc_h / H0, proc_w / W0)
+                padw = round((proc_w - W0 * gain) / 2 - 0.1)
+                padh = round((proc_h - H0 * gain) / 2 - 0.1)
+
+                # Remove padding before final resize
+                y1 = max(padh, 0)
+                y2 = proc_h - max(padh, 0)
+                x1 = max(padw, 0)
+                x2 = proc_w - max(padw, 0)
+                m = m[:, y1:y2, x1:x2]  # [Q, cropped_h, cropped_w]
+
+            # 2) Resize to original size
+            m = torch.nn.functional.interpolate(
+                m.unsqueeze(0), size=(H0, W0), mode="bilinear", align_corners=False
+            ).squeeze(0)  # [Q, H0, W0]
+            out.append(m.clamp_(0, 1).to(device=device, dtype=dtype))
+
+        if single:
+            return [out[0]]
         return out
-
-    def _preds_postprocess(
-        self,
-        outputs: Dict[str, NDArray],
-        proc_sizes,
-        orig_sizes,
-        num_top_queries: int = 300,
-        use_focal_loss: bool = True,
-    ) -> List[Dict[str, NDArray]]:
-        """
-        Return list length=batch of dicts {"labels","boxes","scores"} (NumPy).
-        """
-        logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
-        boxes = self.process_boxes(boxes, proc_sizes, orig_sizes, self.keep_ratio)
-
-        batch_results: List[Dict[str, NDArray]] = []
-        for b in range(logits.shape[0]):
-            log_b, box_b = logits[b], boxes[b]
-
-            if use_focal_loss:
-                prob = 1.0 / (1.0 + np.exp(-log_b))  # sigmoid
-                flat = prob.reshape(-1)
-                top_idx = np.argsort(-flat)[:num_top_queries]
-                scores = flat[top_idx]
-                labels = top_idx % self.n_outputs
-                q_idx = top_idx // self.n_outputs
-                sel_boxes = box_b[q_idx]
-            else:
-                exp = np.exp(log_b - log_b.max(axis=-1, keepdims=True))
-                soft = exp / exp.sum(axis=-1, keepdims=True)
-                soft = soft[..., :-1]  # drop background
-                scores = soft.max(axis=-1)
-                labels = soft.argmax(axis=-1)
-
-                if scores.shape[0] > num_top_queries:
-                    top_idx = np.argsort(-scores)[:num_top_queries]
-                    scores = scores[top_idx]
-                    labels = labels[top_idx]
-                    sel_boxes = box_b[top_idx]
-                else:
-                    sel_boxes = box_b
-
-            batch_results.append(
-                dict(
-                    labels=labels.astype(np.int64),
-                    boxes=sel_boxes.astype(np.float32),
-                    scores=scores.astype(np.float32),
-                )
-            )
-        return batch_results
 
     def _compute_nearest_size(self, shape, target_size, stride: int = 32) -> Tuple[int, int]:
         scale = target_size / max(shape)
@@ -169,18 +174,100 @@ class ONNX_model:
     def _predict(self, inputs: NDArray) -> Dict[str, NDArray]:
         ort_inputs = {self.model.get_inputs()[0].name: inputs.astype(self.np_dtype)}
         outs = self.model.run(None, ort_inputs)
-        return {"pred_logits": outs[0], "pred_boxes": outs[1]}
+        return {
+            "pred_logits": outs[0],
+            "pred_boxes": outs[1],
+            "pred_masks": outs[2] if len(outs) > 2 else None,
+        }
 
-    def _postprocess(self, preds, proc_sz, orig_sz):
-        out = self._preds_postprocess(preds, proc_sz, orig_sz)
-        return filter_preds(out, self.conf_threshs)
+    def _postprocess(
+        self,
+        outputs: torch.Tensor,
+        processed_sizes: List[Tuple[int, int]],
+        original_sizes: List[Tuple[int, int]],
+        num_top_queries=300,
+        use_focal_loss=True,
+    ) -> List[Dict[str, NDArray]]:
+        """
+        Return list length=batch of dicts {"labels","boxes","scores"} (NumPy).
+        """
+        logits, boxes = (
+            torch.from_numpy(outputs["pred_logits"]),
+            torch.from_numpy(outputs["pred_boxes"]),
+        )
+        has_masks = ("pred_masks" in outputs) and (outputs["pred_masks"] is not None)
+        pred_masks = outputs["pred_masks"] if has_masks else None  # [B,Q,Hm,Wm]
+        B, Q = logits.shape[:2]
+
+        boxes = self.process_boxes(boxes, processed_sizes, original_sizes, self.keep_ratio)
+
+        # scores/labels and preliminary topK over all Q*C
+        if use_focal_loss:
+            scores_all = torch.sigmoid(logits)  # [B,Q,C]
+            flat = scores_all.flatten(1)  # [B, Q*C]
+            # pre-topk to avoid scanning all queries later
+            K = min(num_top_queries, flat.shape[1])
+            topk_scores, topk_idx = torch.topk(flat, K, dim=-1)  # [B,K]
+            topk_labels = topk_idx - (topk_idx // self.n_outputs) * self.n_outputs  # [B,K]
+            topk_qidx = topk_idx // self.n_outputs  # [B,K]
+        else:
+            probs = torch.softmax(logits, dim=-1)[:, :, :-1]  # [B,Q,C-1]
+            topk_scores, topk_labels = probs.max(dim=-1)  # [B,Q]
+            # keep at most K queries per image by score
+            K = min(num_top_queries, Q)
+            topk_scores, order = torch.topk(topk_scores, K, dim=-1)  # [B,K]
+            topk_labels = topk_labels.gather(1, order)  # [B,K]
+            topk_qidx = order
+
+        results = []
+        for b in range(B):
+            sb = topk_scores[b]
+            lb = topk_labels[b]
+            qb = topk_qidx[b]
+
+            # Apply per-class confidence thresholds
+            conf_threshs_tensor = torch.tensor(self.conf_threshs, device=sb.device)
+            keep = sb >= conf_threshs_tensor[lb]
+
+            sb = sb[keep]
+            lb = lb[keep]
+            qb = qb[keep]
+            # gather boxes once
+            bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
+
+            out = {
+                "labels": lb.detach().cpu().numpy(),
+                "boxes": bb.detach().cpu().numpy(),
+                "scores": sb.detach().cpu().numpy(),
+            }
+
+            if has_masks and qb.numel() > 0:
+                # gather only kept masks, then cast to half to save mem during resizing
+                mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
+                mb = torch.from_numpy(mb).to(
+                    dtype=torch.float16
+                )  # reduce VRAM and RAM during resize
+                # resize to original size (list of length 1)
+                masks_list = self.process_masks(
+                    mb.unsqueeze(0),  # [1,K',Hm,Wm]
+                    processed_size=np.array(processed_sizes[b]),  # (Hin, Win)
+                    orig_sizes=np.array(original_sizes[b])[None],  # [1,2]
+                    keep_ratio=self.keep_ratio,
+                )
+                out["mask_probs"] = (
+                    masks_list[0].to(dtype=torch.float32).detach().cpu().numpy()
+                )  # [K',H0,W0]
+
+            results.append(out)
+
+        return results
 
     def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, np.ndarray]]:
         """
         Args:
             inputs (HWC BGR np.uint8) or batch BHWC
         Returns:
-            list[dict] with keys: "labels", "boxes", "scores"
+            list[dict] with keys: "labels", "boxes", "scores", "masks"
         """
         proc, proc_sz, orig_sz = self._prepare_inputs(inputs)
         preds = self._predict(proc)
@@ -256,31 +343,29 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     return boxes
 
 
-def norm_xywh_to_abs_xyxy(boxes: np.ndarray, h: int, w: int, clip=True):
-    """
-    Normalised (x_c, y_c, w, h) -> absolute (x1, y1, x2, y2)
-    Keeps full floating-point precision; no rounding.
-    """
-    x_c, y_c, bw, bh = boxes.T
-    x_min = x_c * w - bw * w / 2
-    y_min = y_c * h - bh * h / 2
-    x_max = x_c * w + bw * w / 2
-    y_max = y_c * h + bh * h / 2
+def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int, to_round=True) -> np.ndarray:
+    # Convert normalized centers to absolute pixel coordinates
+    x_center = boxes[:, 0] * width
+    y_center = boxes[:, 1] * height
+    box_width = boxes[:, 2] * width
+    box_height = boxes[:, 3] * height
 
-    if clip:
-        x_min = np.clip(x_min, 0, w - 1)
-        y_min = np.clip(y_min, 0, h - 1)
-        x_max = np.clip(x_max, 0, w - 1)
-        y_max = np.clip(y_max, 0, h - 1)
+    # Compute the top-left and bottom-right coordinates
+    x_min = x_center - (box_width / 2)
+    y_min = y_center - (box_height / 2)
+    x_max = x_center + (box_width / 2)
+    y_max = y_center + (box_height / 2)
 
-    return np.stack([x_min, y_min, x_max, y_max], axis=1)
-
-
-def filter_preds(preds, conf_threshs: List[float]):
-    thresh = np.asarray(conf_threshs, dtype=np.float32)
-    for p in preds:
-        mask = p["scores"] >= thresh[p["labels"]]
-        p["labels"] = p["labels"][mask]
-        p["boxes"] = p["boxes"][mask]
-        p["scores"] = p["scores"][mask]
-    return preds
+    # Convert coordinates to integers
+    if to_round:
+        x_min = np.maximum(np.floor(x_min), 1)
+        y_min = np.maximum(np.floor(y_min), 1)
+        x_max = np.minimum(np.ceil(x_max), width - 1)
+        y_max = np.minimum(np.ceil(y_max), height - 1)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    else:
+        x_min = np.maximum(x_min, 0)
+        y_min = np.maximum(y_min, 0)
+        x_max = np.minimum(x_max, width)
+        y_max = np.minimum(y_max, height)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)

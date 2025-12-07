@@ -240,12 +240,11 @@ class Trainer:
                     orig_sizes=orig_sizes[b].unsqueeze(0),  # [1,2]
                     keep_ratio=self.keep_ratio,
                 )
-                out["masks_prob"] = (
+                out["mask_probs"] = (
                     masks_list[0].to(dtype=torch.float32).detach().cpu()
                 )  # [K',H0,W0]
 
             results.append(out)
-
         return results
 
     def gt_postprocess(self, inputs, targets, orig_sizes):
@@ -330,11 +329,11 @@ class Trainer:
                 )  # filter masks by conf to save memory. Bboxes must be full for mAP calc
 
                 for pred_instance, gt_instance in zip(preds, gt):
-                    if "masks_prob" in pred_instance:
+                    if "mask_probs" in pred_instance:
                         pred_instance["masks"] = (
-                            pred_instance["masks_prob"] >= self.conf_thresh
+                            pred_instance["mask_probs"] >= self.conf_thresh
                         ).to(torch.uint8)  # Binarize
-                        del pred_instance["masks_prob"]
+                        del pred_instance["mask_probs"]
 
                     all_preds.append(pred_instance)
                     all_gt.append(gt_instance)

@@ -388,19 +388,10 @@ def get_mosaic_coordinate(mosaic_image, mosaic_index, xc, yc, w, h, target_h, ta
     return (x1, y1, x2, y2), small_coord
 
 
-# def filter_preds(preds, conf_thresh):
-#     for pred in preds:
-#         keep_idxs = pred["scores"] >= conf_thresh
-#         pred["scores"] = pred["scores"][keep_idxs]
-#         pred["boxes"] = pred["boxes"][keep_idxs]
-#         pred["labels"] = pred["labels"][keep_idxs]
-#     return preds
-
-
-def filter_preds(preds, conf_thresh, mask_source="masks_prob"):
+def filter_preds(preds, conf_thresh, mask_source="mask_probs"):
     """
     Filters predictions by score AND keeps masks in-sync with the kept indices.
-    - If mask_source == "masks_prob" and present, also populates pred["masks"] as uint8 via conf_thresh.
+    - If mask_source == "mask_probs" and present, also populates pred["masks"] as uint8 via conf_thresh.
     """
     for pred in preds:
         keep = pred["scores"] >= conf_thresh
@@ -417,7 +408,7 @@ def filter_preds(preds, conf_thresh, mask_source="masks_prob"):
             m = pred[mask_source][keep]
             pred[mask_source] = m
             # Ensure binary mask view exists (uint8)
-            if mask_source == "masks_prob":
+            if mask_source == "mask_probs":
                 pred["masks"] = (m > conf_thresh).to(torch.uint8)
         elif (
             "masks" in pred
@@ -429,7 +420,7 @@ def filter_preds(preds, conf_thresh, mask_source="masks_prob"):
     return preds
 
 
-def filter_masks(preds, conf_thresh, mask_source="masks_prob"):
+def filter_masks(preds, conf_thresh, mask_source="mask_probs"):
     for pred in preds:
         keep = pred["scores"] >= conf_thresh
 
@@ -442,7 +433,7 @@ def filter_masks(preds, conf_thresh, mask_source="masks_prob"):
             m = pred[mask_source][keep]
             pred[mask_source] = m
             # Ensure binary mask view exists (uint8)
-            if mask_source == "masks_prob":
+            if mask_source == "mask_probs":
                 pred["masks"] = (m > conf_thresh).to(torch.uint8)
         # elif (
         #     "masks" in pred
@@ -596,6 +587,7 @@ def visualize(
             and "masks" in gt_dict
             and gt_dict["masks"] is not None
             and len(gt_dict["masks"]) > 0
+            and gt_dict["masks"].shape[1] != 0
         ):
             for m in gt_dict["masks"]:
                 draw_mask(img, m.numpy(), color=(46, 153, 60), alpha=mask_alpha_gt, outline=True)
@@ -741,6 +733,9 @@ def process_masks(
     single = pred_masks.dim() == 3  # [Q,Hm,Wm]
     if single:
         pred_masks = pred_masks.unsqueeze(0)  # -> [1,Q,Hm,Wm]
+
+    if pred_masks.shape[1] == 0:
+        return [torch.zeros((0, int(orig_sizes[0, 0]), int(orig_sizes[0, 1])))]
 
     B, Q, Hm, Wm = pred_masks.shape
     device = pred_masks.device

@@ -67,7 +67,7 @@ class Torch_model:
         self.model = build_model(
             self.model_name,
             self.n_outputs,
-            self.enable_mask_head == "segment",
+            self.enable_mask_head,
             self.device,
             img_size=None,
         )
@@ -98,17 +98,65 @@ class Torch_model:
         for i in range(len(orig_sizes)):
             if keep_ratio:
                 final_boxes[i] = scale_boxes_ratio_kept(
-                    final_boxes[i],
-                    processed_sizes[i],
-                    orig_sizes[i],
+                    final_boxes[i], processed_sizes[i], orig_sizes[i]
                 )
             else:
-                final_boxes[i] = scale_boxes(
-                    final_boxes[i],
-                    orig_sizes[i],
-                    processed_sizes[i],
-                )
+                final_boxes[i] = scale_boxes(final_boxes[i], orig_sizes[i], processed_sizes[i])
         return torch.tensor(final_boxes).to(device)
+
+    @staticmethod
+    def process_masks(
+        pred_masks,  # Tensor [B, Q, Hm, Wm] or [Q, Hm, Wm]
+        processed_size,  # (H, W) of network input (after your A.Compose)
+        orig_sizes,  # Tensor [B, 2] (H, W)
+        keep_ratio: bool,
+    ) -> List[torch.Tensor]:
+        """
+        Returns list of length B with masks resized to original image sizes:
+        Each item: Float Tensor [Q, H_orig, W_orig] in [0,1] (no thresholding here).
+        - Handles letterbox padding removal if keep_ratio=True.
+        - Works for both batched and single-image inputs.
+        """
+        single = pred_masks.dim() == 3  # [Q,Hm,Wm]
+        if single:
+            pred_masks = pred_masks.unsqueeze(0)  # -> [1,Q,Hm,Wm]
+
+        B, Q, Hm, Wm = pred_masks.shape
+        device = pred_masks.device
+        dtype = pred_masks.dtype
+
+        # 1) Upsample masks to processed (input) size
+        proc_h, proc_w = int(processed_size[0]), int(processed_size[1])
+        masks_proc = torch.nn.functional.interpolate(
+            pred_masks, size=(proc_h, proc_w), mode="bilinear", align_corners=False
+        )  # [B,Q,Hp,Wp] with Hp=proc_h, Wp=proc_w
+
+        out = []
+        for b in range(B):
+            H0, W0 = int(orig_sizes[b, 0].item()), int(orig_sizes[b, 1].item())
+            m = masks_proc[b]  # [Q, Hp, Wp]
+            if keep_ratio:
+                # Compute same gain/pad as in scale_boxes_ratio_kept
+                gain = min(proc_h / H0, proc_w / W0)
+                padw = round((proc_w - W0 * gain) / 2 - 0.1)
+                padh = round((proc_h - H0 * gain) / 2 - 0.1)
+
+                # Remove padding before final resize
+                y1 = max(padh, 0)
+                y2 = proc_h - max(padh, 0)
+                x1 = max(padw, 0)
+                x2 = proc_w - max(padw, 0)
+                m = m[:, y1:y2, x1:x2]  # [Q, cropped_h, cropped_w]
+
+            # 2) Resize to original size
+            m = torch.nn.functional.interpolate(
+                m.unsqueeze(0), size=(H0, W0), mode="bilinear", align_corners=False
+            ).squeeze(0)  # [Q, H0, W0]
+            out.append(m.clamp_(0, 1).to(device=device, dtype=dtype))
+
+        if single:
+            return [out[0]]
+        return out
 
     def _preds_postprocess(
         self,
@@ -122,30 +170,70 @@ class Torch_model:
         returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
         """
         logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
+        has_masks = ("pred_masks" in outputs) and (outputs["pred_masks"] is not None)
+        pred_masks = outputs["pred_masks"] if has_masks else None  # [B,Q,Hm,Wm]
+        B, Q = logits.shape[:2]
+
         boxes = self.process_boxes(
             boxes, processed_sizes, original_sizes, self.keep_ratio, self.device
         )  # B x TopQ x 4
 
+        # scores/labels and preliminary topK over all Q*C
         if use_focal_loss:
-            scores = torch.sigmoid(logits)
-            scores, index = torch.topk(scores.flatten(1), num_top_queries, dim=-1)
-            labels = index - index // self.n_outputs * self.n_outputs
-            index = index // self.n_outputs
-            boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+            scores_all = torch.sigmoid(logits)  # [B,Q,C]
+            flat = scores_all.flatten(1)  # [B, Q*C]
+            # pre-topk to avoid scanning all queries later
+            K = min(num_top_queries, flat.shape[1])
+            topk_scores, topk_idx = torch.topk(flat, K, dim=-1)  # [B,K]
+            topk_labels = topk_idx - (topk_idx // self.n_outputs) * self.n_outputs  # [B,K]
+            topk_qidx = topk_idx // self.n_outputs  # [B,K]
         else:
-            scores = F.softmax(logits)[:, :, :-1]
-            scores, labels = scores.max(dim=-1)
-            if scores.shape[1] > num_top_queries:
-                scores, index = torch.topk(scores, num_top_queries, dim=-1)
-                labels = torch.gather(labels, dim=1, index=index)
-                boxes = torch.gather(
-                    boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1])
-                )
+            probs = torch.softmax(logits, dim=-1)[:, :, :-1]  # [B,Q,C-1]
+            topk_scores, topk_labels = probs.max(dim=-1)  # [B,Q]
+            # keep at most K queries per image by score
+            K = min(num_top_queries, Q)
+            topk_scores, order = torch.topk(topk_scores, K, dim=-1)  # [B,K]
+            topk_labels = topk_labels.gather(1, order)  # [B,K]
+            topk_qidx = order
 
         results = []
-        for lab, box, sco in zip(labels, boxes, scores):
-            result = dict(labels=lab, boxes=box, scores=sco)
-            results.append(result)
+        for b in range(B):
+            sb = topk_scores[b]
+            lb = topk_labels[b]
+            qb = topk_qidx[b]
+            # Apply per-class confidence thresholds
+            conf_threshs_tensor = torch.tensor(self.conf_threshs, device=sb.device)
+            keep = sb >= conf_threshs_tensor[lb]
+
+            sb = sb[keep]
+            lb = lb[keep]
+            qb = qb[keep]
+            # gather boxes once
+            bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
+
+            out = {
+                "labels": lb.detach().cpu(),
+                "boxes": bb.detach().cpu(),
+                "scores": sb.detach().cpu(),
+            }
+
+            if has_masks and qb.numel() > 0:
+                # gather only kept masks, then cast to half to save mem during resizing
+                mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
+                mb = mb.to(dtype=torch.float16)  # reduce VRAM and RAM during resize
+                # resize to original size (list of length 1)
+                masks_list = self.process_masks(
+                    mb.unsqueeze(0),  # [1,K',Hm,Wm]
+                    processed_size=np.array(processed_sizes[b]),  # (Hin, Win)
+                    orig_sizes=np.array(original_sizes[b])[None],  # [1,2]
+                    keep_ratio=self.keep_ratio,
+                )
+                out["mask_probs"] = (
+                    masks_list[0].to(dtype=torch.float32).detach().cpu()
+                )  # [K',H0,W0]
+
+            results.append(out)
+
         return results
 
     def _compute_nearest_size(self, shape, target_size, stride=32) -> Tuple[int, int]:
@@ -223,23 +311,27 @@ class Torch_model:
         original_sizes: List[Tuple[int, int]],
     ):
         output = self._preds_postprocess(preds, processed_sizes, original_sizes)
-        output = filter_preds(output, self.conf_threshs)
         if self.use_nms:
             for idx, res in enumerate(output):
                 boxes, scores, classes = non_max_suppression(
                     res["boxes"],
                     res["scores"],
                     res["labels"],
+                    masks=res.get("mask_probs", None),
                     iou_threshold=0.5,
                 )
                 output[idx]["boxes"] = boxes
                 output[idx]["scores"] = scores
                 output[idx]["labels"] = classes
+                if "mask_probs" in res:
+                    output[idx]["mask_probs"] = res["mask_probs"][torch.arange(len(res["labels"]))]
 
         for res in output:
             res["labels"] = res["labels"].cpu().numpy()
             res["boxes"] = res["boxes"].cpu().numpy()
             res["scores"] = res["scores"].cpu().numpy()
+            if "mask_probs" in res:
+                res["mask_probs"] = res["mask_probs"].cpu().numpy()
         return output
 
     @torch.no_grad()
@@ -251,6 +343,7 @@ class Torch_model:
             labels: np.ndarray of shape (N,), dtype np.int64
             boxes: np.ndarray of shape (N, 4), dtype np.float32, abs values
             scores: np.ndarray of shape (N,), dtype np.float32
+            masks: np.ndarray of shape (N, H, W), dtype np.uint8. N = number of objects
         """
         processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(inputs)
         preds = self._predict(processed_inputs)
@@ -348,24 +441,32 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     return boxes
 
 
-def norm_xywh_to_abs_xyxy(boxes: np.ndarray, h: int, w: int, clip=True):
-    """
-    Normalised (x_c, y_c, w, h) -> absolute (x1, y1, x2, y2)
-    Keeps full floating-point precision; no rounding.
-    """
-    x_c, y_c, bw, bh = boxes.T
-    x_min = x_c * w - bw * w / 2
-    y_min = y_c * h - bh * h / 2
-    x_max = x_c * w + bw * w / 2
-    y_max = y_c * h + bh * h / 2
+def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int, to_round=True) -> np.ndarray:
+    # Convert normalized centers to absolute pixel coordinates
+    x_center = boxes[:, 0] * width
+    y_center = boxes[:, 1] * height
+    box_width = boxes[:, 2] * width
+    box_height = boxes[:, 3] * height
 
-    if clip:
-        x_min = np.clip(x_min, 0, w - 1)
-        y_min = np.clip(y_min, 0, h - 1)
-        x_max = np.clip(x_max, 0, w - 1)
-        y_max = np.clip(y_max, 0, h - 1)
+    # Compute the top-left and bottom-right coordinates
+    x_min = x_center - (box_width / 2)
+    y_min = y_center - (box_height / 2)
+    x_max = x_center + (box_width / 2)
+    y_max = y_center + (box_height / 2)
 
-    return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    # Convert coordinates to integers
+    if to_round:
+        x_min = np.maximum(np.floor(x_min), 1)
+        y_min = np.maximum(np.floor(y_min), 1)
+        x_max = np.minimum(np.ceil(x_max), width - 1)
+        y_max = np.minimum(np.ceil(y_max), height - 1)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    else:
+        x_min = np.maximum(x_min, 0)
+        y_min = np.maximum(y_min, 0)
+        x_max = np.minimum(x_max, width)
+        y_max = np.minimum(y_max, height)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
 
 
 def filter_preds(preds, conf_threshs: List[float]):
@@ -378,7 +479,7 @@ def filter_preds(preds, conf_threshs: List[float]):
     return preds
 
 
-def non_max_suppression(boxes, scores, classes, iou_threshold=0.5):
+def non_max_suppression(boxes, scores, classes, masks=None, iou_threshold=0.5):
     """
     Applies Non-Maximum Suppression (NMS) to filter bounding boxes.
 
@@ -386,18 +487,20 @@ def non_max_suppression(boxes, scores, classes, iou_threshold=0.5):
     - boxes (torch.Tensor): Tensor of shape (N, 4) containing bounding boxes in [x1, y1, x2, y2] format.
     - scores (torch.Tensor): Tensor of shape (N,) containing confidence scores for each box.
     - classes (torch.Tensor): Tensor of shape (N,) containing class indices for each box.
-    - score_threshold (float): Minimum confidence score to consider a box for NMS.
+    - masks (torch.Tensor, optional): Tensor of shape (N, H, W) containing masks for each box.
     - iou_threshold (float): Intersection Over Union (IOU) threshold for NMS.
 
     Returns:
     - filtered_boxes (torch.Tensor): Tensor containing filtered bounding boxes after NMS.
     - filtered_scores (torch.Tensor): Tensor containing confidence scores of the filtered boxes.
     - filtered_classes (torch.Tensor): Tensor containing class indices of the filtered boxes.
+    - filtered_masks (torch.Tensor or None): Tensor containing masks of the filtered boxes, or None if masks was None.
     """
     # Prepare lists to collect the filtered boxes, scores, and classes
     filtered_boxes = []
     filtered_scores = []
     filtered_classes = []
+    filtered_masks = []
 
     # Get unique classes present in the detections
     unique_classes = classes.unique()
@@ -417,40 +520,40 @@ def non_max_suppression(boxes, scores, classes, iou_threshold=0.5):
         filtered_scores.append(cls_scores[nms_indices])
         filtered_classes.append(classes[cls_mask][nms_indices])
 
+        if masks is not None:
+            cls_masks = masks[cls_mask]
+            filtered_masks.append(cls_masks[nms_indices])
+
     # Step 3: Concatenate the results
     if filtered_boxes:
         filtered_boxes = torch.cat(filtered_boxes)
         filtered_scores = torch.cat(filtered_scores)
         filtered_classes = torch.cat(filtered_classes)
+        if masks is not None:
+            filtered_masks = torch.cat(filtered_masks)
+        else:
+            filtered_masks = None
     else:
         # If no boxes remain after NMS, return empty tensors
         filtered_boxes = torch.empty((0, 4))
         filtered_scores = torch.empty((0,))
         filtered_classes = torch.empty((0,), dtype=classes.dtype)
+        filtered_masks = torch.empty((0,)) if masks is not None else None
 
-    return filtered_boxes, filtered_scores, filtered_classes
+    return filtered_boxes, filtered_scores, filtered_classes, filtered_masks
 
 
 if __name__ == "__main__":
-    from pathlib import Path
+    import time
 
-    from src.dl.infer import run_videos
+    m_path = "/Users/argosaakyan/Downloads/test_2025-12-05/model.pt"
+    model = Torch_model(model_name="n", model_path=m_path, n_outputs=1, enable_mask_head=True)
 
-    model = Torch_model(
-        model_name="m",
-        model_path="/Users/argosaakyan/Data/firevision/models/baseline_m_2025-06-23/model.pt",
-        n_outputs=2,
-        input_width=640,
-        input_height=640,
-        conf_thresh=0.4,
-        device="mps",
-    )
+    img = cv2.imread("/Users/argosaakyan/Downloads/IMG_7121.jpeg")
 
-    run_videos(
-        torch_model=model,
-        folder_path=Path("/Users/argosaakyan/Data/firevision/datasets"),
-        output_path=Path("/Users/argosaakyan/Data/firevision/ex"),
-        label_to_name={0: "fire", 1: "no fire"},
-        to_crop=False,
-        paddings=0,
-    )
+    res = model(img)
+    print(res[0]["masks"].shape)
+
+    # save mask as png
+    for i, mask in enumerate(res[0]["masks"]):
+        cv2.imwrite(f"mask_{i}.png", mask * 255)

@@ -71,11 +71,11 @@ class Validator:
         return (m > float(self.conf_thresh)).to(torch.uint8)
 
     def _get_pred_masks_bin(self, pred: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Return [Np,H,W] uint8; prefer 'masks' else binarize 'masks_prob'."""
+        """Return [Np,H,W] uint8; prefer 'masks' else binarize 'mask_probs'."""
         if "masks" in pred and pred["masks"] is not None:
             return self._binarize_masks(pred["masks"])
-        if "masks_prob" in pred and pred["masks_prob"] is not None:
-            return self._binarize_masks(pred["masks_prob"])
+        if "mask_probs" in pred and pred["mask_probs"] is not None:
+            return self._binarize_masks(pred["mask_probs"])
         return torch.zeros((0, 1, 1), dtype=torch.uint8)
 
     def _ensure_binary_pred_masks(self, preds: List[Dict[str, torch.Tensor]]):
@@ -121,16 +121,16 @@ class Validator:
 
     def _get_pred_masks_bin_nhw(self, pred: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Return [Np,H,W] uint8 for preds using 'masks' or 'masks_prob'.
+        Return [Np,H,W] uint8 for preds using 'masks' or 'mask_probs'.
         """
         if "masks" in pred and pred["masks"] is not None and pred["masks"].numel() > 0:
             return self._to_nhw_uint8(pred["masks"])
         if (
-            "masks_prob" in pred
-            and pred["masks_prob"] is not None
-            and pred["masks_prob"].numel() > 0
+            "mask_probs" in pred
+            and pred["mask_probs"] is not None
+            and pred["mask_probs"].numel() > 0
         ):
-            return self._to_nhw_uint8(pred["masks_prob"])
+            return self._to_nhw_uint8(pred["mask_probs"])
         return torch.zeros((0, 1, 1), dtype=torch.uint8)
 
     def _pairwise_mask_iou(self, pm: torch.Tensor, gm: torch.Tensor) -> torch.Tensor:

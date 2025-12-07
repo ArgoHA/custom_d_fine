@@ -315,13 +315,22 @@ class LQE(nn.Module):
 
 class MaskPixelDecoder(nn.Module):
     """
-    Build a 1/4-scale mask feature from backbone (C2-C5) and (optionally) an 'encoder' map.
-    feats: [C2(s4), C3(s8), C4(s16), C5(s32)]
-    Optional 'enc' is a (B,C,H8,W8) feature akin to Ce (stride 8) which we upsample 2x.
+    Fuses multi-scale features from HybridEncoder to produce high-resolution mask features.
 
-    Default configs use 8 as a smallest stride, so in fact it's 1/8 scale.
+    This module combines:
+    1. FPN (top-down) features from HybridEncoder's inner_outs - multi-scale features
+       BEFORE the bottom-up PAN fusion, preserving fine spatial details for segmentation.
+    2. PAN (bottom-up) stride-8 feature - the finest resolution output AFTER full
+       bidirectional fusion, enriched with both local and global context.
 
-    Try upconv to 1/2 of original scale?
+    Input:
+        feats: List of FPN features [F_s8, F_s16, F_s32] from HybridEncoder's inner_outs.
+               Shape: [(B, C, H/8, W/8), (B, C, H/16, W/16), (B, C, H/32, W/32)]
+        enc_feat_1_8: PAN stride-8 feature from HybridEncoder's outs, reshaped from the
+                      flattened memory tensor. Shape: (B, C, H/8, W/8)
+
+    Output:
+        Fused mask features at 1/2 resolution. Shape: (B, out_ch, H/2, W/2)
     """
 
     def __init__(self, in_chs, out_ch=256, use_enc=True):
@@ -346,22 +355,23 @@ class MaskPixelDecoder(nn.Module):
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, feats, enc_feat_1_8=None):
-        # feats: [C2(s4), C3(s8), C4(s16), C5(s32)]
-        c2 = self.bn[0](self.lateral[0](feats[0]))  # (B, out_ch, H/4, W/4)
-        x = c2
+        # feats: FPN features [F_s8, F_s16, F_s32] from HybridEncoder's inner_outs
+        # Project finest FPN level to out_ch
+        f0 = self.bn[0](self.lateral[0](feats[0]))  # (B, out_ch, H/8, W/8)
+        x = f0
 
-        # fuse upsampled higher strides into s4
+        # Fuse upsampled coarser FPN levels into finest resolution
         for i in range(1, len(feats)):
             t = self.bn[i](self.lateral[i](feats[i]))
-            x = x + F.interpolate(t, size=c2.shape[-2:], mode="bilinear", align_corners=False)
+            x = x + F.interpolate(t, size=f0.shape[-2:], mode="bilinear", align_corners=False)
 
-        # add encoder feature (stride 8) upsampled 2x -> stride 4
+        # Add PAN stride-8 feature (detection-enriched context)
         if self.use_enc and enc_feat_1_8 is not None:
             e = self.enc_bn(self.enc_proj(enc_feat_1_8))
-            e = F.interpolate(e, size=c2.shape[-2:], mode="bilinear", align_corners=False)
+            e = F.interpolate(e, size=f0.shape[-2:], mode="bilinear", align_corners=False)
             x = x + e
 
-        # upconv
+        # Upconv to 1/2 resolution
         x = self.act(self.bn1(self.upconv(x)))
         return x  # (B, out_ch, H/2, W/2)
 
