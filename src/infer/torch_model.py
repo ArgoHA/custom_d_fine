@@ -311,7 +311,7 @@ class Torch_model:
         output = self._preds_postprocess(preds, processed_sizes, original_sizes)
         if self.use_nms:
             for idx, res in enumerate(output):
-                boxes, scores, classes = non_max_suppression(
+                boxes, scores, classes, masks = non_max_suppression(
                     res["boxes"],
                     res["scores"],
                     res["labels"],
@@ -322,7 +322,7 @@ class Torch_model:
                 output[idx]["scores"] = scores
                 output[idx]["labels"] = classes
                 if "mask_probs" in res:
-                    output[idx]["mask_probs"] = res["mask_probs"][torch.arange(len(res["labels"]))]
+                    output[idx]["mask_probs"] = masks
 
         for res in output:
             res["labels"] = res["labels"].cpu().numpy()
@@ -536,22 +536,11 @@ def non_max_suppression(boxes, scores, classes, masks=None, iou_threshold=0.5):
         filtered_boxes = torch.empty((0, 4))
         filtered_scores = torch.empty((0,))
         filtered_classes = torch.empty((0,), dtype=classes.dtype)
-        filtered_masks = torch.empty((0,)) if masks is not None else None
+
+        filtered_masks = None
+        if masks is not None:
+            filtered_masks = torch.empty(
+                (0, *masks.shape[1:]), dtype=masks.dtype, device=masks.device
+            )
 
     return filtered_boxes, filtered_scores, filtered_classes, filtered_masks
-
-
-if __name__ == "__main__":
-    import time
-
-    m_path = "/Users/argosaakyan/Downloads/test_2025-12-05/model.pt"
-    model = Torch_model(model_name="n", model_path=m_path, n_outputs=1, enable_mask_head=True)
-
-    img = cv2.imread("/Users/argosaakyan/Downloads/IMG_7121.jpeg")
-
-    res = model(img)
-    print(res[0]["masks"].shape)
-
-    # save mask as png
-    for i, mask in enumerate(res[0]["masks"]):
-        cv2.imwrite(f"mask_{i}.png", mask * 255)

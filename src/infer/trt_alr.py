@@ -21,6 +21,7 @@ class TRT_model:
         half: bool = False,
         keep_ratio: bool = False,
         device: str = None,
+        max_batch_size: int = 1,
     ) -> None:
         self.input_size = (input_height, input_width)
         self.n_outputs = n_outputs
@@ -29,6 +30,7 @@ class TRT_model:
         self.half = half
         self.keep_ratio = keep_ratio
         self.channels = 3
+        self.max_batch_size = max_batch_size
 
         if isinstance(conf_thresh, float):
             self.conf_threshs = [conf_thresh] * self.n_outputs
@@ -65,7 +67,6 @@ class TRT_model:
             if mode == trt.TensorIOMode.INPUT:
                 assert self.input_name is None, "multiple inputs not handled"
                 self.input_name = name
-                in_dtype = self._torch_dtype_from_trt(self.engine.get_tensor_dtype(name))
 
             elif mode == trt.TensorIOMode.OUTPUT:
                 o_dtype = self._torch_dtype_from_trt(self.engine.get_tensor_dtype(name))
@@ -101,9 +102,7 @@ class TRT_model:
             raise TypeError(f"Unsupported TensorRT data type: {trt_dtype}")
 
     def _test_pred(self) -> None:
-        random_image = np.random.randint(
-            0, 255, size=(1100, 1000, self.channels), dtype=np.uint8
-        )
+        random_image = np.random.randint(0, 255, size=(1100, 1000, self.channels), dtype=np.uint8)
         processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(random_image)
         preds = self._predict(processed_inputs)
         self._postprocess(preds, processed_sizes, original_sizes)

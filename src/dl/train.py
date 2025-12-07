@@ -229,6 +229,7 @@ class Trainer:
         orig_sizes: torch.Tensor,
         num_labels: int,
         keep_ratio: bool,
+        conf_thresh: float,
         num_top_queries: int = 300,
         use_focal_loss: bool = True,
     ) -> List[Dict[str, torch.Tensor]]:
@@ -252,8 +253,8 @@ class Trainer:
             # pre-topk to avoid scanning all queries later
             K = min(num_top_queries, flat.shape[1])
             topk_scores, topk_idx = torch.topk(flat, K, dim=-1)  # [B,K]
-            topk_labels = topk_idx - (topk_idx // self.num_labels) * self.num_labels  # [B,K]
-            topk_qidx = topk_idx // self.num_labels  # [B,K]
+            topk_labels = topk_idx - (topk_idx // num_labels) * num_labels  # [B,K]
+            topk_qidx = topk_idx // num_labels  # [B,K]
         else:
             probs = torch.softmax(logits, dim=-1)[:, :, :-1]  # [B,Q,C-1]
             topk_scores, topk_labels = probs.max(dim=-1)  # [B,Q]
@@ -268,7 +269,7 @@ class Trainer:
             sb = topk_scores[b]
             lb = topk_labels[b]
             qb = topk_qidx[b]
-            keep = sb >= self.conf_thresh
+            keep = sb >= conf_thresh
 
             sb = sb[keep]
             lb = lb[keep]
@@ -291,7 +292,7 @@ class Trainer:
                     mb.unsqueeze(0),  # [1,K',Hm,Wm]
                     processed_size=inputs.shape[2:],  # (Hin, Win)
                     orig_sizes=orig_sizes[b].unsqueeze(0),  # [1,2]
-                    keep_ratio=self.keep_ratio,
+                    keep_ratio=keep_ratio,
                 )
                 out["mask_probs"] = (
                     masks_list[0].to(dtype=torch.float32).detach().cpu()
@@ -329,7 +330,7 @@ class Trainer:
                     gt_m,
                     processed_size=inputs[idx].shape[1:],  # (Hnet, Wnet)
                     orig_sizes=orig_sizes[idx].unsqueeze(0),  # [1,2]
-                    keep_ratio=self.keep_ratio,
+                    keep_ratio=keep_ratio,
                 )
                 # back to [Ni,H0,W0] and uint8
                 result["masks"] = (masks_list[0].clamp(0, 1) >= 0.5).to(torch.uint8).detach().cpu()
@@ -376,8 +377,10 @@ class Trainer:
                     torch.stack([t["orig_size"] for t in targets], dim=0).float().to(self.device)
                 )
 
-                gt = self.gt_postprocess(inputs, targets, orig_sizes)
-                preds = self.preds_postprocess(inputs, raw_res, orig_sizes)
+                gt = self.gt_postprocess(inputs, targets, orig_sizes, self.keep_ratio)
+                preds = self.preds_postprocess(
+                    inputs, raw_res, orig_sizes, self.num_labels, self.keep_ratio, self.conf_thresh
+                )
                 preds = filter_masks(
                     preds, self.conf_thresh
                 )  # filter masks by conf to save memory. Bboxes must be full for mAP calc

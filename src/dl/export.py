@@ -180,7 +180,6 @@ def export_to_tensorrt(
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
 def main(cfg: DictConfig):
-    input_name = "input"
     output_names = ["logits", "boxes"]
     if cfg.task == "segment":
         output_names.append("mask_probs")

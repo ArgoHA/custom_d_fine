@@ -259,51 +259,6 @@ def get_transform_matrix(img_shape, new_shape, degrees, scale, shear, translate)
     return M, s
 
 
-# def random_affine(img, targets, segments, target_size, degrees, translate, scales, shear):
-#     M, scale = get_transform_matrix(img.shape[:2], target_size, degrees, scales, shear, translate)
-
-#     if (M != np.eye(3)).any():  # image changed
-#         img = cv2.warpAffine(img, M[:2], dsize=target_size, borderValue=(114, 114, 114))
-
-#     # Transform label coordinates
-#     n = len(targets)
-#     if (n and len(segments) == 0) or (len(segments) != len(targets)):
-#         new = np.zeros((n, 4))
-
-#         xy = np.ones((n * 4, 3))
-#         xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
-#         xy = xy @ M.T  # transform
-#         xy = xy[:, :2].reshape(n, 8)  # perspective rescale or affine
-
-#         # create new boxes
-#         x = xy[:, [0, 2, 4, 6]]
-#         y = xy[:, [1, 3, 5, 7]]
-#         new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
-
-#         # clip
-#         new[:, [0, 2]] = new[:, [0, 2]].clip(0, target_size[0])
-#         new[:, [1, 3]] = new[:, [1, 3]].clip(0, target_size[1])
-
-#     else:
-#         segments = resample_segments(segments)  # upsample
-#         new = np.zeros((len(targets), 4))
-#         assert len(segments) <= len(targets)
-#         for i, segment in enumerate(segments):
-#             xy = np.ones((len(segment), 3))
-#             xy[:, :2] = segment
-#             xy = xy @ M.T  # transform
-#             xy = xy[:, :2]  # perspective rescale or affine
-#             # clip
-#             new[i] = segment2box(xy, target_size[0], target_size[1])
-
-#     # filter candidates
-#     i = box_candidates(box1=targets[:, 1:5].T * scale, box2=new.T, area_thr=0.1)
-#     targets = targets[i]
-#     targets[:, 1:5] = new[i]
-
-#     return img, targets
-
-
 def random_affine(img, targets, segments, target_size, degrees, translate, scales, shear):
     """
     Args:
@@ -436,12 +391,6 @@ def filter_masks(preds, conf_thresh, mask_source="mask_probs"):
             # Ensure binary mask view exists (uint8)
             if mask_source == "mask_probs":
                 pred["masks"] = (m > conf_thresh).to(torch.uint8)
-        # elif (
-        #     "masks" in pred
-        #     and pred["masks"] is not None
-        #     and getattr(pred["masks"], "numel", lambda: 0)() > 0
-        # ):
-        #     pred["masks"] = pred["masks"][keep].to(torch.uint8)
 
     return preds
 
@@ -523,38 +472,6 @@ def vis_one_box(img, box, label, mode, label_to_name, score=None):
         color,
         thickness=2,
     )
-
-
-# def visualize(img_paths, gt, preds, dataset_path, path_to_save, label_to_name):
-#     """
-#     Saves images with drawn bounding boxes.
-#       - Green bboxes for GT
-#       - Blue bboxes for preds
-#     """
-#     path_to_save.mkdir(parents=True, exist_ok=True)
-
-#     for gt_dict, pred_dict, img_path in zip(gt, preds, img_paths):
-#         img = cv2.imread(str(dataset_path / img_path))
-
-#         # Draw ground-truth boxes (green)
-#         for box, label in zip(gt_dict["boxes"], gt_dict["labels"]):
-#             # box: [x1, y1, x2, y2]
-#             vis_one_box(img, box, label, mode="gt", label_to_name=label_to_name)
-
-#         # Draw predicted boxes (blue)
-#         for box, label, score in zip(pred_dict["boxes"], pred_dict["labels"], pred_dict["scores"]):
-#             vis_one_box(
-#                 img,
-#                 box,
-#                 label,
-#                 mode="pred",
-#                 label_to_name=label_to_name,
-#                 score=score,
-#             )
-
-#         # Construct a filename and save
-#         outpath = path_to_save / img_path.name
-#         cv2.imwrite(str(outpath), img)
 
 
 def visualize(
@@ -977,8 +894,6 @@ def norm_poly_to_abs(poly_norm_flat: np.ndarray, H: int, W: int) -> np.ndarray:
 
 
 def poly_abs_to_mask(poly_abs: np.ndarray, h: int, w: int) -> np.ndarray:
-    # if poly_abs.size < 6:
-    #     return np.zeros((h, w), dtype=np.uint8)
     pts = poly_abs.copy()
     pts = np.round(pts).astype(np.int32)
     m = np.zeros((h, w), dtype=np.uint8)
