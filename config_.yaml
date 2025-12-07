@@ -1,5 +1,5 @@
-project_name: vis_drone # for wandb
-exp_name: baseline # experiment name
+project_name: default_project # for wandb
+exp_name: base # experiment name
 
 exp: ${exp_name}_${now_dir}
 
@@ -7,12 +7,12 @@ model_name: s # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/vis_drone # project root with dataset and outputs
+  root: /path # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
   pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
   data_path: ${train.root}/data/dataset # path to dataset
-  path_to_test_data: ${train.root}/VisDrone2019-DET-test-dev/images  # path to test set, used in infer script
+  path_to_test_data: ${train.root}/data/test  # path to test set, used in infer script
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
   debug_img_path: ${train.root}/output/debug_images
@@ -24,16 +24,9 @@ train:
   use_wandb: True
   device: cuda
   label_to_name: # dataset's classes
-    0: pedestrian
-    1: people
-    2: bicycle
-    3: car
-    4: van
-    5: truck
-    6: tricycle
-    7: awning-tricycle
-    8: bus
-    9: motor
+    0: class_0
+    1: class_1
+    2: class_2
 
   use_one_class: False
 
@@ -54,12 +47,12 @@ train:
   amp_enabled: True # use automatic mixed precision
   clip_max_norm: 0.1 # gradient clipping
 
-  batch_size: 8 # physical, should fit on the device
+  batch_size: 8 # physical, should fit on the device. In DDP used per GPU
   b_accum_steps: 1 # grad accumulation (n * bs)
   epochs: 55
   early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
-  num_workers: 12
+  num_workers: 12 # In DDP used per GPU
 
   ### Validation ###
   conf_thresh: 0.5

@@ -44,10 +44,12 @@ def save_yolo_annotations(res, output_path, img_path, img_shape):
     with open(output_path / f"{Path(img_path).stem}.txt", "a") as f:
         for class_id, box in zip(res["labels"], res["boxes"]):
             norm_box = abs_xyxy_to_norm_xywh(box[None], img_shape[0], img_shape[1])[0]
-            f.write(f"{int(class_id)} {norm_box[0]} {norm_box[1]} {norm_box[2]} {norm_box[3]}\n")
+            f.write(
+                f"{int(class_id)} {norm_box[0]:.6f} {norm_box[1]:.6f} {norm_box[2]:.6f} {norm_box[3]:.6f}\n"
+            )
 
 
-def crops(or_img, res, paddings, img_path, output_path, output_stem):
+def crops(or_img, res, paddings, output_path, output_stem):
     if isinstance(paddings["w"], float):
         paddings["w"] = int(or_img.shape[1] * paddings["w"])
     if isinstance(paddings["h"], float):
@@ -97,7 +99,7 @@ def run_images(torch_model, folder_path, output_path, label_to_name, to_crop, pa
         )
 
         if to_crop:
-            crops(or_img, res, paddings, img_path, output_path, Path(img_path).stem)
+            crops(or_img, res, paddings, output_path, Path(img_path).stem)
 
     with open(output_path / "labels.txt", "w") as f:
         for class_id in labels:
@@ -144,7 +146,7 @@ def run_videos(torch_model, folder_path, output_path, label_to_name, to_crop, pa
             )
 
             if to_crop:
-                crops(img, res, paddings, vid_path, output_path, frame_name)
+                crops(img, res, paddings, output_path, frame_name)
 
             success, img = vid.read()
 

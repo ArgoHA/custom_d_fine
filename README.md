@@ -1,23 +1,32 @@
-# SoTA Object Detection D-FINE model training, exporting, inferencing pipeline from scratch
-This is a custom project to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection transformer based model. Model author's repo: [D-FINE](https://github.com/Peterande/D-FINE).
-This is not a fork, but a complete rewrite from scratch. Only model atchitecture and loss functions were used from original repo.
+# D-FINE Object Detection Framework (Train, Export, Inference)
 
-Check out [the tutorial video](https://youtu.be/_uEyRRw4miY) to get familiar with this pipeline.
+This is a framework to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection transformer based model. Model author's repo: [D-FINE](https://github.com/Peterande/D-FINE).
+This is not a fork, but a complete rewrite from scratch. Only model atchitecture and loss functions were used from the original repo.
+
+Check out [the video tutorial](https://youtu.be/_uEyRRw4miY) to get familiar with this framework.
 
 ## Main scripts
+
 To run the scripts, use the following commands:
+
 ```bash
-python -m src.etl.preprocess    # Converts images and PDFs to JPG format
-python -m src.etl.split         # Creates train, validation, and test CSVs with image paths
-python -m src.dl.train          # Runs the training pipeline
-python -m src.dl.export         # Exports weights in various formats after training
-python -m src.dl.bench          # Runs all exported models on the test set
-python -m src.dl.infer          # Runs model ontest folder, saves visualisations and txt preds
+make preprocess     # Converts images to JPG format. You don't have to use this.
+make split          # Creates train, validation, and test CSVs with image paths
+make train          # Runs the training pipeline, including DDP version
+make export         # Exports weights in various formats after training
+make bench          # Runs all exported models on the test set
+make infer          # Runs model ontest folder, saves visualisations and txt preds
+make check_errors   # Runs model on train and val sets, saves only missmatched boxes with GT
+make test_batching  # Gets stats to find the optimal batch size for your model and GPU
+make ov_int8        # Runs int8 accuracy aware quantization for OpenVINO. Can take several hours
 ```
 
-Note: if you don't pass any parameters, you can run any of these scripts with `make script_name`, for exmaple: `make train` will run `python -m src.dl.train`. You can also just run `make` to run all scripts one by one (excluding last, infer script)
+Note: if you want to pass parameters, you can run any of these scripts with `python -m src.dl script_name` (use `etl` instead of `dl` for `preprocess` and `split`), You can also just run `make` to run `preprocess, split, train, export, bench` scripts as 1 sequence.
+
+For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and run `make train` as usual.
 
 ## Usage example
+
 0. `git clone https://github.com/ArgoHA/custom_d_fine.git`
 1. For bigger models (l, x) download from [gdrive](https://drive.google.com/drive/folders/1cjfMS_YV5LcoJsYi-fy0HWBZQU6eeP-7?usp=share_link) andput into `pretrained` folder
 2. Prepare your data: `images` folder and `labels` folder (txt file per image in YOLO format).
@@ -37,6 +46,7 @@ Note: if you don't pass any parameters, you can run any of these scripts with `m
 5. Run `train` script, changing confurations, iterating, untill you get desired results.
 6. Run `export`script to create ONNX, TensorRT, OpenVINO models.
 
+
 ## Labels format
 One row = one object
 
@@ -46,25 +56,32 @@ Detection:
 Segmentation:
 [class_id, xy, xy, ...], coords normalized. Length = number of points + 1
 
+
 [Training example with Colab](https://colab.research.google.com/drive/1ZV12qnUQMpC0g3j-0G-tYhmmdM98a41X?usp=sharing)
 
 If you run train script passing the args in the command and not changing them in the config file - you should also pass changed args to other scripts like `export` or `infer`. Example:
+
 ```bash
 python -m src.dl.train exp_name=my_experiment
 python -m src.dl.export exp_name=my_experiment
 ```
 
 ## Exporting tips
-Half precision:
-- usually makes sense if your hardware was more FLOPs in fp16
-- works best with TensorRT
-- for Torch version, AMP is used when Half flag is true, but if FLOPs are the same for fp32 and fp16 - I see AMP being a little slower during inference.
-- is not used for OpenVINO, as it automatically picks precision
 
-Dynamic input means that during inference, we cut black paddings from letterbox. I don't recommend using it with D-FINE as accuracy degrades too much (probably because absolute Positional Encoding of pathces)
+TensorRT export must be done on the GPU that you are going to use for inferencing.
+
+Half precision:
+
+- usually makes inference faster with minimum accuracy suffering
+- works best with TensorRT and OpenVINO (when running on GPU cores). OpenVINO can be exported ones and then can be inferenced in both fp32 or fp16. Note on Apple Silicon right now OpenVINO version of D-FINE works only in full precision.
+- Not used for ONNX and Torch at the moment.
+
+Dynamic input means that during inference, we cut black paddings from letterbox. I don't recommend using it with D-FINE as accuracy degrades too much (probably because absolute Positional Encoding of patches)
 
 ## Inference
+
 Use inference classes in `src/infer`. Currently available:
+
 - Torch
 - TensorRT
 - OpenVINO
@@ -72,12 +89,89 @@ Use inference classes in `src/infer`. Currently available:
 
 You can run inference on a folder (path_to_test_data) of images or on a folder of videos. Crops will be created automatically. You can control it and paddings from config.yaml in the `infer` section.
 
+## Performace benchmarks
+
+All benchmarks below are on the same **custom dataset** with **D-FINEm** at **640×640**.
+Latency numbers include image preprocessing -> model inference -> postprocessing.
+
+### Desktop: Intel i5-12400F + RTX 5070 Ti
+
+```
++----------------------+--------------+--------------+
+| Format               |   F1 score   | Latency (ms) |
++----------------------+--------------+--------------+
+| Torch, FP32, GPU     |    0.9161    |    16.6      |
+| TensorRT, FP32, GPU  |    0.9166    |    7.5       |
+| TensorRT, FP16, GPU  |    0.9167    |    5.5       |
+| OpenVINO, FP32, CPU  |    0.9165    |    115.4     |
+| OpenVINO, FP16, CPU  |    0.9165    |    115.4     |
+| OpenVINO, INT8, CPU  |    0.9139    |    44.1      |
+| ONNX, FP32, CPU      |    0.9165    |    150.6     |
++----------------------+--------------+--------------+
+```
+
+**Notes (desktop):**
+
+- TensorRT FP16 gives ~**3x speedup** vs Torch FP32 GPU with **no meaningful F1 drop**.
+- On the CPU, OpenVINO seems to ignore FP16 - it's identical to FP32.
+- OpenVINO INT8 on CPU gives ~**2.6x speedup** vs FP32 with a **small F1 drop** on this particular dataset.
+
+---
+
+### Edge device: Intel N150 (CPU with iGPU cores)
+
+```
++----------------------+--------------+--------------+
+| Format               |   F1 score   | Latency (ms) |
++----------------------+--------------+--------------+
+| OpenVINO, FP32, iGPU |    0.9165    |     350.8    |
+| OpenVINO, FP16, iGPU |    0.9157    |     209.6    |
+| OpenVINO, INT8, iGPU |    0.9116    |     123.1    |
+| OpenVINO, FP32, CPU  |    0.9165    |     505.2    |
+| OpenVINO, FP16, CPU  |    0.9165    |     505.2    |
+| OpenVINO, INT8, CPU  |    0.9139    |     252.7    |
++----------------------+--------------+--------------+
+```
+
+**Notes (edge / N150):**
+
+- On the iGPU, FP16 and INT8 both give **significant latency reductions** with **minor F1 degradation**.
+- On the CPU, FP16 again seems to be ignored, while INT8 still gives a solid speedup.
+
+### How to interpret these numbers
+
+- FP16 is often a great sweet spot on GPUs: same accuracy, noticeably faster inference.
+- On CPUs, FP16 may or may not be accelerated, depending on the hardware.
+- INT8 can give big speedups on both CPU and GPU, but the accuracy drop is highly data- and model-dependent.
+
+I recommend always benchmarking on your own hardware and dataset.
+
+## Batched inference
+
+Another thing to check on your hardware and model is batch size when you run batched inference (to get higher throughput, losing overall service latency). For that you can simpli run `make test_batching`, it will run torch model with different batch sizes and calculate **throughput** (proccesed images per second) and **average latency (per image). For example, with Intel i5-12400F + RTX 5070 Ti and D-FINEm, ~4 is the optimal batch size to inference with Torch.
+
+```
++------+------------+-------------------+
+|  bs  | throughput | latency_per_image |
++------+------------+-------------------+
+| 1.0  |    76.4    |       13.1        |
+| 2.0  |   113.4    |        8.8        |
+| 4.0  |   138.1    |        7.2        |
+| 8.0  |   122.7    |        8.1        |
+| 16.0 |   119.7    |        8.4        |
+| 32.0 |   117.8    |        8.5        |
++------+------------+-------------------+
+```
+
 ## Outputs
+
 - **Models**: Saved during the training process and export at `output/models/exp_name_date`. Includes training logs, table with main metrics, confusion matrics, f1-score_vs_threshold and precisino_recall_vs_threshold. In extended_metrics you can file per class metrics (saved during final eval after all epochs)
 - **Debug images**: Preprocessed images (including augmentations) are saved at `output/debug_images/split` as they are fed into the model (except for normalization).
 - **Evaluation predicts**: Visualised model's predictions on val set. Includes GT as green and preds as blue.
 - **Bench images**: Visualised model's predictions with inference class. Uses all exported models
 - **Infer**: Visualised model's predictions and predicted annotations in yolo txt format
+- **Check errors**: Creats a folder check_errors with FP and FN bboxes only. Used to check model's errors on training and val sets and to find mislabelled samples.
+- **Test batching**: Csv file with all tested batch sizes and latency
 
 ## Results examples
 **Train**
@@ -100,6 +194,7 @@ You can run inference on a folder (path_to_test_data) of images or on a folder o
 
 
 ## Features
+
 - Training pipeline from SoTA D-FINE model
 - Export to ONNX, OpenVino, TensorRT.
 - Inference class for Torch, TensorRT, OpenVINO on images or videos
@@ -107,6 +202,7 @@ You can run inference on a folder (path_to_test_data) of images or on a folder o
 - Augs based on the [albumentations](https://albumentations.ai) lib
 - Mosaic augmentation, multiscale aug
 - Metrics: mAPs, Precision, Recall, F1-score, Confusion matrix, IoU, plots
+- Distributed Data Parallel (DDP) training
 - After training is done - runs a test to calculate the optimal conf threshold
 - Exponential moving average model
 - Batch accumulation
@@ -127,14 +223,15 @@ You can run inference on a folder (path_to_test_data) of images or on a folder o
 - Gradio UI demo
 
 ## TODO
+
 - Finetune with layers freeze
 - Add support for cashing in dataset
-- Add support for multi GPU training
 - Instance segmentation
 - Smart dataset preprocessing. Detect small objects. Detect near duplicates (remove from val/test)
 
 
 ## Acknowledgement
+
 This project is built upon original [D-FINE repo](https://github.com/Peterande/D-FINE). Thank you to the D-FINE team for an awesome model!
 
 ``` bibtex

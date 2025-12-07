@@ -138,6 +138,7 @@ def test_model(
         all_preds,
         conf_thresh=conf_thresh,
         iou_thresh=iou_thresh,
+        label_to_name=label_to_name,
     )
     metrics = validator.compute_metrics(extended=False)
 
@@ -197,10 +198,24 @@ def main(cfg: DictConfig):
         input_width=cfg.train.img_size[1],
         input_height=cfg.train.img_size[0],
         conf_thresh=conf_thresh,
-        rect=cfg.export.dynamic_input,
-        half=cfg.export.half,
+        rect=False,
+        half=False,
         keep_ratio=cfg.train.keep_ratio,
     )
+
+    ov_int8_path = Path(cfg.train.path_to_save) / "model_int8.xml"
+    if ov_int8_path.exists():
+        ov_int8_model = OV_model(
+            model_path=ov_int8_path,
+            n_outputs=len(cfg.train.label_to_name),
+            input_width=cfg.train.img_size[1],
+            input_height=cfg.train.img_size[0],
+            conf_thresh=conf_thresh,
+            rect=cfg.export.dynamic_input,
+            half=cfg.export.half,
+            keep_ratio=cfg.train.keep_ratio,
+            max_batch_size=1,
+        )
 
     data_path = Path(cfg.train.data_path)
     val_loader, test_loader = BenchLoader(
@@ -223,6 +238,9 @@ def main(cfg: DictConfig):
         "TensorRT": trt_model,
         "ONNX": onnx_model,
     }
+    if ov_int8_path.exists():
+        models["OpenVINO INT8"] = ov_int8_model
+
     for model_name, model in models.items():
         all_metrics[model_name] = test_model(
             val_loader,

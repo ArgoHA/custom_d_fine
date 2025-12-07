@@ -6,7 +6,6 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 from numpy.typing import NDArray
-from torch.amp import autocast
 from torchvision.ops import nms
 
 from src.d_fine.dfine import build_model
@@ -46,19 +45,15 @@ class Torch_model:
             self.conf_threshs = conf_thresh
 
         if not device:
-            self.device = torch.device("cpu")
+            self.device = "cpu"
             if torch.backends.mps.is_available():
-                self.device = torch.device("mps")
+                self.device = "mps"
             if torch.cuda.is_available():
-                self.device = torch.device("cuda")
+                self.device = "cuda"
         else:
             self.device = device
 
         self.np_dtype = np.float32
-        if self.half:
-            self.amp_enabled = True
-        else:
-            self.amp_enabled = False
 
         self._load_model()
         self._test_pred()
@@ -78,7 +73,7 @@ class Torch_model:
         self.model.eval()
         self.model.to(self.device)
 
-        logger.info(f"Torch model, Device: {self.device}, AMP: {self.amp_enabled}")
+        logger.info(f"Torch model, Device: {self.device}")
 
     def _test_pred(self) -> None:
         random_image = np.random.randint(0, 255, size=(1100, 1000, self.channels), dtype=np.uint8)
@@ -295,13 +290,16 @@ class Torch_model:
                 processed_sizes.append(
                     (processed_inputs[idx].shape[1], processed_inputs[idx].shape[2])
                 )
-        return torch.tensor(processed_inputs).to(self.device), processed_sizes, original_sizes
+
+        tensor = torch.from_numpy(processed_inputs)  # no copying
+        if self.device == "cuda":
+            tensor = tensor.pin_memory().to(self.device, non_blocking=True)
+        else:
+            tensor = tensor.to(self.device)
+        return tensor, processed_sizes, original_sizes
 
     @torch.no_grad()
     def _predict(self, inputs) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-        if self.amp_enabled:
-            with autocast("cuda"):
-                return self.model(inputs)
         return self.model(inputs)
 
     def _postprocess(

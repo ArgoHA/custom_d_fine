@@ -11,7 +11,9 @@ from albumentations.pytorch import ToTensorV2
 from loguru import logger
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
+from src.d_fine.dist_utils import is_main_process
 from src.dl.utils import (
     LetterboxRect,
     abs_xyxy_to_norm_xywh,
@@ -226,12 +228,12 @@ class CustomDataset(Dataset):
 
         # Get labels
         labels_path = self.root_path / "labels" / f"{image_path.stem}.txt"
-
         targets = np.zeros((0, 5), dtype=np.float32)
         polys_abs = []  # list[(K, 2)] normalized; may be []
 
-        if labels_path.exists() and labels_path.stat().st_size:
+        if labels_path.exists() and labels_path.stat().st_size > 1:
             boxes_norm, polys_norm = parse_yolo_label_file(labels_path)
+
 
             if boxes_norm.shape[0] and self.use_one_class:
                 boxes_norm[:, 0] = 0
@@ -338,7 +340,8 @@ class CustomDataset(Dataset):
 
     def close_mosaic(self):
         self.mosaic_prob = 0.0
-        logger.info("Closing mosaic")
+        if is_main_process():
+            logger.info("Closing mosaic")
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -433,6 +436,7 @@ class Loader:
         self._get_splits()
         self.class_names = list(cfg.train.label_to_name.values())
         self.multiscale_prob = cfg.train.augs.multiscale_prob
+        self.train_sampler = None
 
     def _get_splits(self) -> None:
         self.splits = {"train": None, "val": None, "test": None}
@@ -457,7 +461,7 @@ class Loader:
                 continue
             for image_path in split.iloc[:, 0]:
                 labels_path = self.root_path / "labels" / f"{Path(image_path).stem}.txt"
-                if not (labels_path.exists() and labels_path.stat().st_size):
+                if not (labels_path.exists() and labels_path.stat().st_size > 1):
                     continue
                 targets, _ = parse_yolo_label_file(labels_path)
                 if targets.ndim == 1:
@@ -493,24 +497,44 @@ class Loader:
         images = images.intersection(split_images)
         return len(images - labels)
 
-    def _build_dataloader_impl(self, dataset: Dataset, shuffle: bool = False) -> DataLoader:
+    def _build_dataloader_impl(
+        self, dataset: Dataset, shuffle: bool = False, distributed: bool = False
+    ) -> DataLoader:
         collate_fn = self.val_collate_fn
         if dataset.mode == "train":
             collate_fn = self.train_collate_fn
+
+        sampler = None
+        shuffle_flag = shuffle
+
+        if distributed:
+            # Use DistributedSampler for both train and val/test in DDP mode
+            # For val/test: shuffle=False, drop_last=False to ensure all samples are evaluated
+            sampler = DistributedSampler(
+                dataset, shuffle=(shuffle and dataset.mode == "train"), drop_last=False
+            )
+            shuffle_flag = False  # cannot use shuffle=True when sampler is set
 
         dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            shuffle=shuffle,
+            shuffle=shuffle_flag,
+            sampler=sampler,
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
             prefetch_factor=4,
             pin_memory=True,
         )
+
+        if dataset.mode == "train":
+            self.train_sampler = sampler
+
         return dataloader
 
-    def build_dataloaders(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    def build_dataloaders(
+        self, distributed: bool = False
+    ) -> Tuple[DataLoader, DataLoader, DataLoader]:
         train_ds = CustomDataset(
             self.img_size,
             self.root_path,
@@ -528,8 +552,8 @@ class Loader:
             cfg=self.cfg,
         )
 
-        train_loader = self._build_dataloader_impl(train_ds, shuffle=True)
-        val_loader = self._build_dataloader_impl(val_ds)
+        train_loader = self._build_dataloader_impl(train_ds, shuffle=True, distributed=distributed)
+        val_loader = self._build_dataloader_impl(val_ds, shuffle=False, distributed=distributed)
 
         test_loader = None
         test_ds = []
@@ -542,14 +566,19 @@ class Loader:
                 mode="test",
                 cfg=self.cfg,
             )
-            test_loader = self._build_dataloader_impl(test_ds)
+            test_loader = self._build_dataloader_impl(
+                test_ds, shuffle=False, distributed=distributed
+            )
 
-        logger.info(f"Images in train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
-        obj_stats = self._get_label_stats()
-        logger.info(
-            f"Objects count: {', '.join(f'{key}: {value}' for key, value in obj_stats.items())}"
-        )
-        logger.info(f"Background images: {self._get_amount_of_background()}")
+        if is_main_process():
+            logger.info(
+                f"Images in train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}"
+            )
+            obj_stats = self._get_label_stats()
+            logger.info(
+                f"Objects count: {', '.join(f'{key}: {value}' for key, value in obj_stats.items())}"
+            )
+            logger.info(f"Background images: {self._get_amount_of_background()}")
         return train_loader, val_loader, test_loader
 
     def _collate_fn(self, batch) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:

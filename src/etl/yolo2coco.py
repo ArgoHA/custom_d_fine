@@ -18,7 +18,9 @@ def yolo_to_coco(labels_dir, images_dir, output_file, split, categories_list=Non
 
     label_files = []
     for label_file in Path(labels_dir).iterdir():
-        if str(label_file.name).endswith(".txt") and str(label_file.name) in split[0].tolist():
+        if str(label_file.name).endswith(".txt") and (
+            str(label_file.name) in split[0].tolist() if split is not None else True
+        ):
             label_files.append(label_file.name)
 
     for label_file in label_files:
@@ -108,12 +110,14 @@ def main(cfg):
     labels_path = dataset_path / "labels"
     imgs_path = dataset_path / "images"
 
-    for csv in ["train", "val"]:
-        split = pd.read_csv(dataset_path / f"{csv}.csv", header=None)
-        split[0] = split[0].str.replace(".jpg", ".txt")
-        output = dataset_path / f"{csv}_annotations.json"
+    # for csv in ["train", "val"]:
+    #     split = pd.read_csv(dataset_path / f"{csv}.csv", header=None)
+    #     split[0] = split[0].str.replace(".jpg", ".txt")
+    #     output = dataset_path / f"{csv}_annotations.json"
 
-        yolo_to_coco(labels_path, imgs_path, output, split, categories)
+    #     yolo_to_coco(labels_path, imgs_path, output, split, categories)
+
+    yolo_to_coco(labels_path, imgs_path, dataset_path / "annotations.json", None, categories)
 
 
 if __name__ == "__main__":

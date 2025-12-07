@@ -201,8 +201,6 @@ def main(cfg: DictConfig):
         cfg.export.max_batch_size,
         half=False,
         dynamic_input=False,
-        input_name=input_name,
-        output_names=output_names,
     )
 
     export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)

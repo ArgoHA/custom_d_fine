@@ -26,7 +26,7 @@ class OV_model:
         self.input_size = (input_height, input_width)
         self.n_outputs = n_outputs
         self.model_path = model_path
-        self.device = device
+        self.device = device.upper() if device else device
         self.rect = rect
         self.half = half
         self.keep_ratio = keep_ratio
@@ -39,10 +39,7 @@ class OV_model:
         elif isinstance(conf_thresh, list):
             self.conf_threshs = conf_thresh
 
-        if self.half:
-            self.np_dtype = np.float16
-        else:
-            self.np_dtype = np.float32
+        self.np_dtype = np.float32
 
         self._load_model()
         self._test_pred()

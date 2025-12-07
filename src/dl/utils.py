@@ -43,7 +43,11 @@ def wandb_logger(loss, metrics: Dict[str, float], epoch, mode: str) -> None:
         log_data[f"{mode}/loss/"] = loss
 
     for metric_name, metric_value in metrics.items():
-        log_data[f"{mode}/metrics/{metric_name}"] = metric_value
+        if metric_name == "extended_metrics":
+            for ext_metric_name, ext_metric_value in metric_value.items():
+                log_data[f"{mode}_extended/{ext_metric_name}"] = ext_metric_value
+        else:
+            log_data[f"{mode}/metrics/{metric_name}"] = metric_value
 
     wandb.log(log_data)
 
@@ -64,20 +68,13 @@ def rename_metric_keys(d, label_to_name):
 
 
 def log_metrics_locally(
-    all_metrics: Dict[str, Dict[str, float]],
-    path_to_save: Path,
-    epoch: int,
-    extended=False,
-    label_to_name=None,
+    all_metrics: Dict[str, Dict[str, float]], path_to_save: Path, epoch: int, extended=False
 ) -> None:
     metrics_df = pd.DataFrame.from_dict(all_metrics, orient="index")
     metrics_df = metrics_df.round(4)
     if extended:
-        extended_metrics = metrics_df["extended_metrics"].map(
-            lambda d: rename_metric_keys(d, label_to_name)
-        )
         extended_metrics = pd.DataFrame.from_records(
-            extended_metrics.tolist(), index=metrics_df.index
+            metrics_df["extended_metrics"].tolist(), index=metrics_df.index
         ).round(4)
 
     metrics_df = metrics_df[
@@ -117,7 +114,7 @@ def calculate_remaining_time(
         minutes, _ = divmod(remainder, 60)
         return f"{int(hours):02}:{int(minutes):02}"
 
-    time_for_remaining_epochs = one_epoch_time * (epochs + 1 - epoch)
+    time_for_remaining_epochs = max(one_epoch_time * (epochs + 1 - epoch), 0)
     current_epoch_progress = time.time() - epoch_start_time
     hours, remainder = divmod(time_for_remaining_epochs - current_epoch_progress, 3600)
     minutes, _ = divmod(remainder, 60)
@@ -154,36 +151,40 @@ def get_vram_usage():
         return 0
 
 
-def norm_xywh_to_abs_xyxy(boxes: np.ndarray, h: int, w: int, clip=True):
-    """
-    Normalised (x_c, y_c, w, h) -> absolute (x1, y1, x2, y2)
-    Keeps full floating-point precision; no rounding.
-    """
-    x_c, y_c, bw, bh = boxes.T
-    x_min = x_c * w - bw * w / 2
-    y_min = y_c * h - bh * h / 2
-    x_max = x_c * w + bw * w / 2
-    y_max = y_c * h + bh * h / 2
+def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int, to_round=True) -> np.ndarray:
+    # Convert normalized centers to absolute pixel coordinates
+    x_center = boxes[:, 0] * width
+    y_center = boxes[:, 1] * height
+    box_width = boxes[:, 2] * width
+    box_height = boxes[:, 3] * height
 
-    if clip:
-        x_min = np.clip(x_min, 0, w - 1)
-        y_min = np.clip(y_min, 0, h - 1)
-        x_max = np.clip(x_max, 0, w - 1)
-        y_max = np.clip(y_max, 0, h - 1)
+    # Compute the top-left and bottom-right coordinates
+    x_min = x_center - (box_width / 2)
+    y_min = y_center - (box_height / 2)
+    x_max = x_center + (box_width / 2)
+    y_max = y_center + (box_height / 2)
 
-    return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    # Convert coordinates to integers
+    if to_round:
+        x_min = np.maximum(np.floor(x_min), 1)
+        y_min = np.maximum(np.floor(y_min), 1)
+        x_max = np.minimum(np.ceil(x_max), width - 1)
+        y_max = np.minimum(np.ceil(y_max), height - 1)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+    else:
+        x_min = np.maximum(x_min, 0)
+        y_min = np.maximum(y_min, 0)
+        x_max = np.minimum(x_max, width)
+        y_max = np.minimum(y_max, height)
+        return np.stack([x_min, y_min, x_max, y_max], axis=1)
 
 
-def abs_xyxy_to_norm_xywh(boxes: np.ndarray, h: int, w: int):
-    """
-    Absolute (x1, y1, x2, y2) -> normalised (x_c, y_c, w, h)
-    """
-    x1, y1, x2, y2 = boxes.T
-    x_c = (x1 + x2) / 2 / w
-    y_c = (y1 + y2) / 2 / h
-    bw = (x2 - x1) / w
-    bh = (y2 - y1) / h
-    return np.stack([x_c, y_c, bw, bh], axis=1)
+def abs_xyxy_to_norm_xywh(boxes: np.ndarray, height: int, width: int) -> np.ndarray:
+    x_center = (boxes[:, 0] + boxes[:, 2]) / 2 / width
+    y_center = (boxes[:, 1] + boxes[:, 3]) / 2 / height
+    box_width = (boxes[:, 2] - boxes[:, 0]) / width
+    box_height = (boxes[:, 3] - boxes[:, 1]) / height
+    return np.stack([x_center, y_center, box_width, box_height], axis=1)
 
 
 def get_aug_params(value, center=0):
@@ -512,10 +513,11 @@ def vis_one_box(img, box, label, mode, label_to_name, score=None):
         color=color,
         thickness=2,
     )
+    y = y1 - 16 if mode == "gt" else y1 - 4
     cv2.putText(
         img,
         f"{prefix}{label_to_name[int(label)]}{postfix}",
-        (x1, max(0, y1 - 5)),
+        (x1, max(0, y)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
         color,

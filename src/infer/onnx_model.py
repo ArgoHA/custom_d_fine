@@ -50,6 +50,7 @@ class ONNX_model:
         self.model = ort.InferenceSession(
             self.model_path, providers=providers, provider_options=provider_options
         )
+        print(f"ONNX model loaded: {self.model_path} on {self.device}")
 
     def _test_pred(self) -> None:
         """Run one dummy inference so that latent bugs fail fast."""

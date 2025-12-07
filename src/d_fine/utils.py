@@ -3,6 +3,8 @@ from typing import Dict
 import torch
 from loguru import logger
 
+from .dist_utils import is_main_process
+
 obj365_ids = [
     0,
     46,
@@ -174,5 +176,6 @@ def load_tuning_state(model, path: str):
         stat, infos = matched_state(model.state_dict(), pretrain_state_dict)
 
     model.load_state_dict(stat, strict=False)
-    logger.info(f"Pretrained weigts from {path}, {infos}")
+    if is_main_process():
+        logger.info(f"Pretrained weigts from {path}, {infos}")
     return model

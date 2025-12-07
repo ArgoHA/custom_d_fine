@@ -191,7 +191,13 @@ class TRT_model:
                 processed_sizes.append(
                     (processed_inputs[idx].shape[1], processed_inputs[idx].shape[2])
                 )
-        return torch.tensor(processed_inputs).to(self.device), processed_sizes, original_sizes
+
+        tensor = torch.from_numpy(processed_inputs)  # no copying
+        if self.device == "cuda":
+            tensor = tensor.pin_memory().to(self.device, non_blocking=True)
+        else:
+            tensor = tensor.to(self.device)
+        return tensor, processed_sizes, original_sizes
 
     def _predict(self, img: torch.Tensor) -> List[torch.Tensor]:
         # 1) make contiguous and grab the full (B, C, H, W) shape
@@ -214,7 +220,7 @@ class TRT_model:
             if mode == trt.TensorIOMode.INPUT:
                 # set our actual batch‐shape on the context
                 ok = self.context.set_input_shape(name, batch_shape)
-                assert ok, f"Failed to set input shape for {name} → {batch_shape}"
+                assert ok, f"Failed to set input shape for {name} -> {batch_shape}"
                 # point that binding at our tensor’s data ptr
                 bindings[i] = img.data_ptr()
             else:
