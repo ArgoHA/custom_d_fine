@@ -465,7 +465,7 @@ class TransformerDecoder(nn.Module):
         ref_points_detach = F.sigmoid(ref_points_unact)
         dec_out_queries = (
             [] if return_queries else None
-        )  # Collect per-layer query features for segmentaiton head
+        )  # Collect per-layer query features for segmentation head
 
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)
