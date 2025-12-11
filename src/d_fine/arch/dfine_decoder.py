@@ -447,7 +447,7 @@ class TransformerDecoder(nn.Module):
         reg_scale,
         attn_mask=None,
         memory_mask=None,
-        dn_meta=None,
+        return_queries: bool = False,
     ):
         output = target
         output_detach = pred_corners_undetach = 0
@@ -463,7 +463,9 @@ class TransformerDecoder(nn.Module):
             project = self.project
 
         ref_points_detach = F.sigmoid(ref_points_unact)
-        dec_out_queries = []  # Collect per-layer query features for segmentaiton head
+        dec_out_queries = (
+            [] if return_queries else None
+        )  # Collect per-layer query features for segmentaiton head
 
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)
@@ -481,7 +483,8 @@ class TransformerDecoder(nn.Module):
             output = layer(
                 output, ref_points_input, value, spatial_shapes, attn_mask, query_pos_embed
             )  # decoder query embeddings
-            dec_out_queries.append(output)
+            if return_queries:
+                dec_out_queries.append(output)
 
             if i == 0:
                 # Initial bounding box predictions with inverse sigmoid refinement
@@ -511,6 +514,11 @@ class TransformerDecoder(nn.Module):
             ref_points_detach = inter_ref_bbox.detach()
             output_detach = output.detach()
 
+        if return_queries:
+            hs = torch.stack(dec_out_queries)
+        else:
+            hs = None
+
         return (
             torch.stack(dec_out_bboxes),
             torch.stack(dec_out_logits),
@@ -518,7 +526,7 @@ class TransformerDecoder(nn.Module):
             torch.stack(dec_out_refs),
             pre_bboxes,
             pre_scores,
-            torch.stack(dec_out_queries),
+            hs,
         )
 
 
@@ -920,13 +928,10 @@ class DFINETransformer(nn.Module):
             # inference path – allow masks if branch is enabled
             return True
         # train path – only if any sample has non-empty masks
-        try:
-            for t in targets:
-                m = t.get("masks", None)
-                if m is not None and hasattr(m, "numel") and m.numel() > 0:
-                    return True
-        except Exception:
-            pass
+        for t in targets:
+            m = t.get("masks", None)
+            if m is not None and hasattr(m, "numel") and m.numel() > 0:
+                return True
         return False
 
     def _mask_logits_from_h(self, h, mask_feat):  # h: [B,Q,C]
@@ -974,7 +979,7 @@ class DFINETransformer(nn.Module):
             self.up,
             self.reg_scale,
             attn_mask=attn_mask,
-            dn_meta=dn_meta,
+            return_queries=do_masks,
         )  # hs: [num_layers, B, Q, C]
 
         if self.training and dn_meta is not None:

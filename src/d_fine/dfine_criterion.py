@@ -318,9 +318,13 @@ class DFINECriterion(nn.Module):
         # If for robustness some matched pairs were skipped (no GT mask),
         # align pred_sel length to tgt_sel (take the same count from the start).
         if pred_sel.shape[0] != tgt_sel.shape[0]:
-            M = min(pred_sel.shape[0], tgt_sel.shape[0])
-            pred_sel = pred_sel[:M]
-            tgt_sel = tgt_sel[:M]
+            # M = min(pred_sel.shape[0], tgt_sel.shape[0])
+            # pred_sel = pred_sel[:M]
+            # tgt_sel = tgt_sel[:M]
+            raise AssertionError(
+                f"Mismatch between number of selected predictions ({pred_sel.shape[0]}) and target masks ({tgt_sel.shape[0]}). "
+                "This indicates a data alignment issue that should be investigated."
+            )
 
         # BCE (average over pixels per instance, then mean over instances), normalized like others
         bce_per_pixel = F.binary_cross_entropy_with_logits(pred_sel, tgt_sel, reduction="none")

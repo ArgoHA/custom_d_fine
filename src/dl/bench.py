@@ -76,8 +76,6 @@ def test_model(
     output_path.mkdir(exist_ok=True, parents=True)
 
     for _, targets, img_paths in tqdm(test_loader, total=len(test_loader)):
-        gt = []
-        preds = []
         for img_path, targets in zip(img_paths, targets):
             img = cv2.imread(str(data_path / "images" / img_path))
 
@@ -106,7 +104,6 @@ def test_model(
             gt_dict = {"boxes": gt_boxes, "labels": gt_labels.int()}
             if "masks" in targets:
                 gt_dict["masks"] = gt_masks
-            gt.append(gt_dict)
             all_gt.append(gt_dict)
 
             pred_dict = {
@@ -120,14 +117,13 @@ def test_model(
                     model_preds[batch]["mask_probs"] >= conf_thresh
                 ).to(torch.uint8)
 
-            preds.append(pred_dict)
             all_preds.append(pred_dict)
 
             if to_visualize:
                 visualize(
                     img_paths,
-                    gt,
-                    preds,
+                    [gt_dict],
+                    [pred_dict],
                     dataset_path=data_path / "images",
                     path_to_save=output_path,
                     label_to_name=label_to_name,

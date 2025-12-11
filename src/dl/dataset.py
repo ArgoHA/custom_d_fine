@@ -52,6 +52,10 @@ def parse_yolo_label_file(path: Path):
             elif len(nums) >= 6:  # segmentation annotations
                 if len(nums) % 2 == 1:
                     nums = nums[:-1]
+                    logger.warning(
+                        f"Odd number of coordinates in segmentation annotation at {path}:{ln}: {s}. "
+                        "Dropping the last value."
+                    )
                 poly = np.array(nums).reshape(-1, 2)  # (K, 2)
                 polys_norm.append(poly)
                 x_min, y_min = poly.min(axis=0)
@@ -233,7 +237,6 @@ class CustomDataset(Dataset):
 
         if labels_path.exists() and labels_path.stat().st_size > 1:
             boxes_norm, polys_norm = parse_yolo_label_file(labels_path)
-
 
             if boxes_norm.shape[0] and self.use_one_class:
                 boxes_norm[:, 0] = 0

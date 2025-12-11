@@ -34,13 +34,23 @@ class Validator:
         self.iou_thresh = iou_thresh
         self.thresholds = np.arange(0.2, 1.0, 0.05)
         self.label_to_name = label_to_name
+        self.conf_matrix = None
 
         self.torch_metric = MeanAveragePrecision(
             box_format="xyxy", iou_type="bbox", sync_on_compute=False
         )
         self.torch_metric.warn_on_many_detections = False
-        self.torch_metric.update(preds, gt)
-        self.conf_matrix = None
+
+        # get raw preds for torchmetrics
+        self.torchmetrics_preds = copy.deepcopy(preds)
+
+        if "all_boxes" in self.torchmetrics_preds[0]:
+            for torchmetrics_pred in self.torchmetrics_preds:
+                for key in ["boxes", "labels", "scores"]:
+                    torchmetrics_pred[key] = torchmetrics_pred[f"all_{key}"]
+                    del torchmetrics_pred[f"all_{key}"]
+
+        self.torch_metric.update(self.torchmetrics_preds, gt)
 
         # when masks available - instance-weighted IoU will be calculated
         self.use_masks = any(("masks" in p) for p in preds) and any(("masks" in g) for g in gt)
@@ -50,14 +60,13 @@ class Validator:
             preds_for_segm = self._ensure_binary_pred_masks(copy.deepcopy(preds))
             self.torch_metric_mask.update(preds_for_segm, gt)
 
-    def compute_metrics(self, extended=False) -> Dict[str, float]:
+    def compute_metrics(self, extended=False, ignore_masks=False) -> Dict[str, float]:
         self.torch_metrics = self.torch_metric.compute()
-        filtered_preds = filter_preds(copy.deepcopy(self.preds), self.conf_thresh)
 
-        metrics = self._compute_main_metrics(filtered_preds)
+        metrics = self._compute_main_metrics(self.preds, ignore_masks=ignore_masks)
         metrics["mAP_50"] = self.torch_metrics["map_50"].item()
         metrics["mAP_50_95"] = self.torch_metrics["map"].item()
-        if self.use_masks:
+        if self.use_masks and not ignore_masks:
             tm_mask = self.torch_metric_mask.compute()
             metrics["mAP_50_mask"] = tm_mask["map_50"].item()
             metrics["mAP_50_95_mask"] = tm_mask["map"].item()
@@ -149,12 +158,12 @@ class Validator:
         union = area_p + area_g - inter
         return torch.where(union > 0, inter / union, torch.zeros_like(union))
 
-    def _compute_main_metrics(self, preds):
+    def _compute_main_metrics(self, preds, ignore_masks=False):
         (
             self.metrics_per_class,
             self.conf_matrix,
             self.class_to_idx,
-        ) = self._compute_metrics_and_confusion_matrix(preds)
+        ) = self._compute_metrics_and_confusion_matrix(preds, ignore_masks=ignore_masks)
         tps, fps, fns = 0, 0, 0
         ious = []
         extended_metrics = {}
@@ -208,73 +217,8 @@ class Validator:
             "extended_metrics": extended_metrics,
         }
 
-    # def _compute_matrix_multi_class(self, preds):
-    #     metrics_per_class = defaultdict(lambda: {"TPs": 0, "FPs": 0, "FNs": 0, "IoUs": []})
-    #     for pred, gt in zip(preds, self.gt):
-    #         pred_boxes = pred["boxes"]
-    #         pred_labels = pred["labels"]
-    #         gt_boxes = gt["boxes"]
-    #         gt_labels = gt["labels"]
-
-    #         # isolate each class
-    #         labels = torch.unique(torch.cat([pred_labels, gt_labels]))
-    #         for label in labels:
-    #             pred_cl_boxes = pred_boxes[pred_labels == label]  # filter by bool mask
-    #             gt_cl_boxes = gt_boxes[gt_labels == label]
-
-    #             n_preds = len(pred_cl_boxes)
-    #             n_gts = len(gt_cl_boxes)
-    #             if not (n_preds or n_gts):
-    #                 continue
-    #             if not n_preds:
-    #                 metrics_per_class[label.item()]["FNs"] += n_gts
-    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
-    #                 continue
-    #             if not n_gts:
-    #                 metrics_per_class[label.item()]["FPs"] += n_preds
-    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
-    #                 continue
-
-    #             ious = box_iou(pred_cl_boxes, gt_cl_boxes)  # matrix of all IoUs
-    #             ious_mask = ious >= self.iou_thresh
-
-    #             # indeces of boxes that have IoU >= threshold
-    #             pred_indices, gt_indices = torch.nonzero(ious_mask, as_tuple=True)
-
-    #             if not pred_indices.numel():  # no predicts matched gts
-    #                 metrics_per_class[label.item()]["FNs"] += n_gts
-    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_gts)
-    #                 metrics_per_class[label.item()]["FPs"] += n_preds
-    #                 metrics_per_class[label.item()]["IoUs"].extend([0] * n_preds)
-    #                 continue
-
-    #             iou_values = ious[pred_indices, gt_indices]
-
-    #             # sorting by IoU to match hgihest scores first
-    #             sorted_indices = torch.argsort(-iou_values)
-    #             pred_indices = pred_indices[sorted_indices]
-    #             gt_indices = gt_indices[sorted_indices]
-    #             iou_values = iou_values[sorted_indices]
-
-    #             matched_preds = set()
-    #             matched_gts = set()
-    #             for pred_idx, gt_idx, iou in zip(pred_indices, gt_indices, iou_values):
-    #                 if gt_idx.item() not in matched_gts and pred_idx.item() not in matched_preds:
-    #                     matched_preds.add(pred_idx.item())
-    #                     matched_gts.add(gt_idx.item())
-    #                     metrics_per_class[label.item()]["TPs"] += 1
-    #                     metrics_per_class[label.item()]["IoUs"].append(iou.item())
-
-    #             unmatched_preds = set(range(n_preds)) - matched_preds
-    #             unmatched_gts = set(range(n_gts)) - matched_gts
-    #             metrics_per_class[label.item()]["FPs"] += len(unmatched_preds)
-    #             metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_preds))
-    #             metrics_per_class[label.item()]["FNs"] += len(unmatched_gts)
-    #             metrics_per_class[label.item()]["IoUs"].extend([0] * len(unmatched_gts))
-    #     return metrics_per_class
-
-    def _compute_metrics_and_confusion_matrix(self, preds):
-        if self.use_masks:
+    def _compute_metrics_and_confusion_matrix(self, preds, ignore_masks):
+        if self.use_masks and not ignore_masks:
             return self._compute_metrics_and_confusion_matrix_masks(preds)
         # Initialize per-class metrics
         metrics_per_class = defaultdict(lambda: {"TPs": 0, "FPs": 0, "FNs": 0, "IoUs": []})
@@ -525,13 +469,17 @@ class Validator:
         precisions, recalls, f1_scores = [], [], []
 
         # Store the original predictions to reset after each threshold
-        original_preds = copy.deepcopy(self.preds)
-
         for threshold in thresholds:
+            torchmetrics_preds = copy.deepcopy(self.torchmetrics_preds)
+            # remove masks as they are already filtered and we wll get a shape mismatch
+            for torchmetrics_pred in torchmetrics_preds:
+                if "masks" in torchmetrics_pred:
+                    del torchmetrics_pred["masks"]
+
             # Filter predictions based on the current threshold
-            filtered_preds = filter_preds(copy.deepcopy(original_preds), threshold)
+            filtered_preds = filter_preds(torchmetrics_preds, threshold, mask_source="masks")
             # Compute metrics with the filtered predictions
-            metrics = self._compute_main_metrics(filtered_preds)
+            metrics = self._compute_main_metrics(filtered_preds, ignore_masks=True)
             precisions.append(metrics["precision"])
             recalls.append(metrics["recall"])
             f1_scores.append(metrics["f1"])
@@ -564,7 +512,7 @@ class Validator:
         best_f1 = f1_scores[best_idx]
 
         logger.info(
-            f"Best Threshold: {round(best_threshold, 2)} with F1 Score: {round(best_f1, 3)}"
+            f"Best Threshold for object detection: {round(best_threshold, 2)} with F1 Score: {round(best_f1, 3)}"
         )
 
 

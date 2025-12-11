@@ -694,6 +694,23 @@ def process_masks(
     return out
 
 
+def cleanup_masks(masks, boxes):
+    # clean up masks outside of the corresponding bbox
+    N, H, W = masks.shape
+    ys = torch.arange(H)[None, :, None]  # (1, H, 1)
+    xs = torch.arange(W)[None, None, :]  # (1, 1, W)
+
+    x1, y1, x2, y2 = boxes.T
+    inside = (
+        (xs >= x1[:, None, None])
+        & (xs < x2[:, None, None])
+        & (ys >= y1[:, None, None])
+        & (ys < y2[:, None, None])
+    )  # (N, H, W), bool
+    masks = masks * inside.to(dtype=masks.dtype)
+    return masks
+
+
 def get_latest_experiment_name(exp: str, output_dir: str):
     output_dir = Path(output_dir)
     if output_dir.exists():

@@ -308,7 +308,9 @@ class TRT_model:
                 )
                 out["mask_probs"] = (
                     masks_list[0].to(dtype=torch.float32).detach().cpu().numpy()
-                )  # [K',H0,W0]
+                )  # [B, H, W]
+                # clean up masks outside of the corresponding bbox
+                out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
 
             results.append(out)
 
@@ -442,3 +444,20 @@ def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int, to_round=T
         x_max = np.minimum(x_max, width)
         y_max = np.minimum(y_max, height)
         return np.stack([x_min, y_min, x_max, y_max], axis=1)
+
+
+def cleanup_masks(masks, boxes):
+    # clean up masks outside of the corresponding bbox
+    N, H, W = masks.shape
+    ys = np.arange(H)[None, :, None]  # (1, H, 1)
+    xs = np.arange(W)[None, None, :]  # (1, 1, W)
+
+    x1, y1, x2, y2 = boxes.T
+    inside = (
+        (xs >= x1[:, None, None])
+        & (xs < x2[:, None, None])
+        & (ys >= y1[:, None, None])
+        & (ys < y2[:, None, None])
+    )  # (N, H, W), bool
+    masks = masks * inside.astype(masks.dtype)
+    return masks

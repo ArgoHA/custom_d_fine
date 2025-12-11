@@ -33,8 +33,7 @@ from src.d_fine.dist_utils import (
 from src.dl.dataset import Loader
 from src.dl.utils import (
     calculate_remaining_time,
-    filter_masks,
-    filter_preds,
+    cleanup_masks,
     get_latest_experiment_name,
     get_vram_usage,
     log_metrics_locally,
@@ -149,7 +148,7 @@ class Trainer:
             cfg.model_name,
             self.num_labels,
             enable_mask_head,
-            self.device,
+            str(self.device),
             img_size=cfg.train.img_size,
             pretrained_model_path=cfg.train.pretrained_model_path,
         )
@@ -266,6 +265,7 @@ class Trainer:
 
         results = []
         for b in range(B):
+            # Filter by conf thresh, but keep boxes for mAP calc
             sb = topk_scores[b]
             lb = topk_labels[b]
             qb = topk_qidx[b]
@@ -277,26 +277,42 @@ class Trainer:
             # gather boxes once
             bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
 
+            # gather all_boxes using topk query indices to match all_scores/all_labels ordering
+            all_bb = boxes[b].gather(0, topk_qidx[b].unsqueeze(-1).repeat(1, 4))
+
             out = {
                 "labels": lb.detach().cpu(),
                 "boxes": bb.detach().cpu(),
                 "scores": sb.detach().cpu(),
+                "all_boxes": all_bb.detach().cpu(),
+                "all_scores": topk_scores[b].detach().cpu(),
+                "all_labels": topk_labels[b].detach().cpu(),
             }
 
             if has_masks and qb.numel() > 0:
-                # gather only kept masks, then cast to half to save mem during resizing
-                mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
+                # gather only kept masks, cast to half to save mem during resizing
+                mb = pred_masks[b, qb]
                 mb = mb.to(dtype=torch.float16)  # reduce VRAM and RAM during resize
-                # resize to original size (list of length 1)
+                # resize to original size (list with length 1)
                 masks_list = process_masks(
-                    mb.unsqueeze(0),  # [1,K',Hm,Wm]
-                    processed_size=inputs.shape[2:],  # (Hin, Win)
-                    orig_sizes=orig_sizes[b].unsqueeze(0),  # [1,2]
+                    mb.unsqueeze(0),
+                    processed_size=inputs.shape[2:],
+                    orig_sizes=orig_sizes[b].unsqueeze(0),
                     keep_ratio=keep_ratio,
                 )
                 out["mask_probs"] = (
                     masks_list[0].to(dtype=torch.float32).detach().cpu()
                 )  # [K',H0,W0]
+
+                # binarize masks
+                out["masks"] = (
+                    (masks_list[0].clamp(0, 1) >= conf_thresh).to(torch.uint8).detach().cpu()
+                )  # [B, H, W]
+
+                # clean up masks outside of the corresponding bbox
+                out["masks"] = cleanup_masks(out["masks"], out["boxes"])
+
+                del out["mask_probs"]
 
             results.append(out)
         return results
@@ -361,7 +377,7 @@ class Trainer:
             for idx, (inputs, targets, img_paths) in enumerate(val_loader):
                 inputs = inputs.to(self.device)
                 if self.amp_enabled:
-                    with autocast(self.device, cache_enabled=True):
+                    with autocast(str(self.device), cache_enabled=True):
                         raw_res = model(inputs)
                 else:
                     raw_res = model(inputs)
@@ -381,17 +397,9 @@ class Trainer:
                 preds = self.preds_postprocess(
                     inputs, raw_res, orig_sizes, self.num_labels, self.keep_ratio, self.conf_thresh
                 )
-                preds = filter_masks(
-                    preds, self.conf_thresh
-                )  # filter masks by conf to save memory. Bboxes must be full for mAP calc
 
-                for pred_instance, gt_instance in zip(preds, gt):
-                    if "mask_probs" in pred_instance:
-                        pred_instance["masks"] = (
-                            pred_instance["mask_probs"] >= self.conf_thresh
-                        ).to(torch.uint8)  # Binarize
-                        del pred_instance["mask_probs"]
-
+                # collect all preds and gt for metrics
+                for gt_instance, pred_instance in zip(gt, preds):
                     all_preds.append(pred_instance)
                     all_gt.append(gt_instance)
 
@@ -399,36 +407,13 @@ class Trainer:
                     visualize(
                         img_paths,
                         gt,
-                        filter_preds(preds, self.conf_thresh),
+                        preds,
                         dataset_path=Path(self.cfg.train.data_path) / "images",
                         path_to_save=self.eval_preds_path,
                         label_to_name=self.label_to_name,
                     )
 
         return all_gt, all_preds
-
-    @staticmethod
-    def get_metrics(
-        gt,
-        preds,
-        conf_thresh: float,
-        iou_thresh: float,
-        extended: bool,
-        label_to_name: Dict[int, str],
-        path_to_save=None,
-        mode=None,
-    ):
-        validator = Validator(
-            gt,
-            preds,
-            conf_thresh=conf_thresh,
-            iou_thresh=iou_thresh,
-            label_to_name=label_to_name,
-        )
-        metrics = validator.compute_metrics(extended=extended)
-        if path_to_save:  # val and test
-            validator.save_plots(path_to_save / "plots" / mode)
-        return metrics
 
     def evaluate(
         self,
@@ -452,16 +437,16 @@ class Trainer:
         # Only rank 0 computes metrics
         metrics = None
         if self.is_main and all_preds is not None and all_gt is not None:
-            metrics = self.get_metrics(
+            validator = Validator(
                 all_gt,
                 all_preds,
-                conf_thresh,
-                iou_thresh,
-                extended=extended,
+                conf_thresh=conf_thresh,
+                iou_thresh=iou_thresh,
                 label_to_name=self.label_to_name,
-                path_to_save=path_to_save,
-                mode=mode,
             )
+            metrics = validator.compute_metrics(extended=extended)
+            if path_to_save:  # val and test
+                validator.save_plots(path_to_save / "plots" / mode)
 
         # Synchronize before returning so all ranks wait for metrics computation
         if self.distributed:
@@ -672,6 +657,7 @@ def main(cfg: DictConfig) -> None:
             model = build_model(
                 cfg.model_name,
                 len(cfg.train.label_to_name),
+                cfg.task == "segment",
                 cfg.train.device,
                 img_size=cfg.train.img_size,
             )

@@ -207,9 +207,9 @@ class Torch_model:
             bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
 
             out = {
-                "labels": lb.detach().cpu(),
-                "boxes": bb.detach().cpu(),
-                "scores": sb.detach().cpu(),
+                "labels": lb.detach().cpu().numpy(),
+                "boxes": bb.detach().cpu().numpy(),
+                "scores": sb.detach().cpu().numpy(),
             }
 
             if has_masks and qb.numel() > 0:
@@ -224,8 +224,10 @@ class Torch_model:
                     keep_ratio=self.keep_ratio,
                 )
                 out["mask_probs"] = (
-                    masks_list[0].to(dtype=torch.float32).detach().cpu()
-                )  # [K',H0,W0]
+                    masks_list[0].to(dtype=torch.float32).detach().cpu().numpy()
+                )  # [B, H, W]
+                # clean up masks outside of the corresponding bbox
+                out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
 
             results.append(out)
 
@@ -324,12 +326,6 @@ class Torch_model:
                 if "mask_probs" in res:
                     output[idx]["mask_probs"] = masks
 
-        for res in output:
-            res["labels"] = res["labels"].cpu().numpy()
-            res["boxes"] = res["boxes"].cpu().numpy()
-            res["scores"] = res["scores"].cpu().numpy()
-            if "mask_probs" in res:
-                res["mask_probs"] = res["mask_probs"].cpu().numpy()
         return output
 
     @torch.no_grad()
@@ -475,6 +471,23 @@ def filter_preds(preds, conf_threshs: List[float]):
         pred["boxes"] = pred["boxes"][mask]
         pred["labels"] = pred["labels"][mask]
     return preds
+
+
+def cleanup_masks(masks, boxes):
+    # clean up masks outside of the corresponding bbox
+    N, H, W = masks.shape
+    ys = np.arange(H)[None, :, None]  # (1, H, 1)
+    xs = np.arange(W)[None, None, :]  # (1, 1, W)
+
+    x1, y1, x2, y2 = boxes.T
+    inside = (
+        (xs >= x1[:, None, None])
+        & (xs < x2[:, None, None])
+        & (ys >= y1[:, None, None])
+        & (ys < y2[:, None, None])
+    )  # (N, H, W), bool
+    masks = masks * inside.astype(masks.dtype)
+    return masks
 
 
 def non_max_suppression(boxes, scores, classes, masks=None, iou_threshold=0.5):

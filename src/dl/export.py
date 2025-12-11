@@ -37,6 +37,7 @@ def export_to_onnx(
     dynamic_input: bool,
     input_name: str,
     output_names: list[str],
+    enable_mask_head: bool,
 ) -> None:
     dynamic_axes = {}
     if max_batch_size > 1:
@@ -45,6 +46,8 @@ def export_to_onnx(
             output_names[0]: {0: "batch_size"},
             output_names[1]: {0: "batch_size"},
         }
+    if enable_mask_head:
+        dynamic_axes[output_names[2]] = {0: "batch_size"}
     if dynamic_input:
         if input_name not in dynamic_axes:
             dynamic_axes[input_name] = {}
@@ -180,8 +183,10 @@ def export_to_tensorrt(
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
 def main(cfg: DictConfig):
+    input_name = "input"
     output_names = ["logits", "boxes"]
-    if cfg.task == "segment":
+    enable_mask_head = cfg.task == "segment"
+    if enable_mask_head:
         output_names.append("mask_probs")
 
     device = cfg.train.device
@@ -200,6 +205,9 @@ def main(cfg: DictConfig):
         cfg.export.max_batch_size,
         half=False,
         dynamic_input=False,
+        input_name=input_name,
+        output_names=output_names,
+        enable_mask_head=enable_mask_head,
     )
 
     export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
