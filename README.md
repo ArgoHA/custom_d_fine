@@ -30,7 +30,7 @@ For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and
 
 ## Usage example
 
-0. `git clone https://github.com/ArgoHA/d_fine_seg.git`
+0. `git clone https://github.com/ArgoHA/D-FINE-seg.git`
 1. For bigger models (l, x) download from [gdrive](https://drive.google.com/drive/folders/1cjfMS_YV5LcoJsYi-fy0HWBZQU6eeP-7?usp=share_link) andput into `pretrained` folder
 2. Prepare your data: `images` folder and `labels` folder (txt file per image in YOLO format).
 3. Customize `config.yaml`, minimal example:
