@@ -6,17 +6,17 @@ Check out [the video tutorial](https://youtu.be/_uEyRRw4miY) to get familiar wit
 
 ## Introducing Instance Segmentation
 
-This goes beyond the original paper and is developed specifically for this framework. Segmentation task is still an early feature and there are no pretrained weights for segentation head yet.
+This goes beyond the original paper and is developed specifically for this framework. Segmentation task is still an early feature and there are no pretrained weights for segentation head yet. Note that Mosaic augmentation is not implemented for segmentation yet, so turn it off during training
 
 ## Main scripts
 
 To run the scripts, use the following commands:
 
 ```bash
-make preprocess     # Converts images to JPG format. You don't have to use this.
 make split          # Creates train, validation, and test CSVs with image paths
 make train          # Runs the training pipeline, including DDP version
 make export         # Exports weights in various formats after training
+
 make bench          # Runs all exported models on the test set
 make infer          # Runs model ontest folder, saves visualisations and txt preds
 make check_errors   # Runs model on train and val sets, saves only missmatched boxes with GT
@@ -32,8 +32,9 @@ For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and
 
 0. `git clone https://github.com/ArgoHA/D-FINE-seg.git`
 1. For bigger models (l, x) download from [gdrive](https://drive.google.com/drive/folders/1cjfMS_YV5LcoJsYi-fy0HWBZQU6eeP-7?usp=share_link) andput into `pretrained` folder
-2. Prepare your data: `images` folder and `labels` folder (txt file per image in YOLO format).
+2. Prepare your data: `images` folder and `labels` folder - txt file per image in YOLO format.
 3. Customize `config.yaml`, minimal example:
+      - `task`. Set to `segment` to enable Segmentation head.
       - `exp_name`. This is experiment name which is used in model's output folder. After you train a model, you can run export/bench/infer and it will use the model under this name + current date.
       - `root`. Path to the directory where you store your dataset and where model outputs will be saved
       - `data_path`. Path to the folder with `images` and `labels`
@@ -43,7 +44,6 @@ For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and
 4. Run `preprocess` and `split` scripts from d_fine_seg repo.
 5. Run `train` script, changing confurations, iterating, untill you get desired results.
 6. Run `export`script to create ONNX, TensorRT, OpenVINO models.
-
 
 [Training example with Colab](https://colab.research.google.com/drive/1ZV12qnUQMpC0g3j-0G-tYhmmdM98a41X?usp=sharing)
 
@@ -67,7 +67,6 @@ We use YOLO labels format. One txt file per image (with the same stem). One row 
 **Detection**: [class_id, xc, yc, w, h], coords normalized
 
 **Segmentation**: [class_id, xy, xy, ...], coords normalized. Length = number of points + 1
-
 
 ## Exporting tips
 
@@ -199,6 +198,7 @@ Another thing to check on your hardware and model is batch size when you run bat
 ## Features
 
 - Training pipeline from SoTA D-FINE model
+- Instance Segmentation task.
 - Export to ONNX, OpenVino, TensorRT.
 - Inference class for Torch, TensorRT, OpenVINO on images or videos
 - Label smoothing in Focal loss
@@ -229,9 +229,7 @@ Another thing to check on your hardware and model is batch size when you run bat
 
 - Finetune with layers freeze
 - Add support for cashing in dataset
-- Instance segmentation
 - Smart dataset preprocessing. Detect small objects. Detect near duplicates (remove from val/test)
-
 
 ## Acknowledgement
 
