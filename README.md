@@ -1,9 +1,12 @@
-# D-FINE Object Detection Framework (Train, Export, Inference)
+# D-FINE-seg Object Detection and Segmentation Framework (Train, Export, Inference)
 
-This is a framework to work with [D-FINE](https://arxiv.org/abs/2410.13842) - state of the art object detection transformer based model. Model author's repo: [D-FINE](https://github.com/Peterande/D-FINE).
-This is not a fork, but a complete rewrite from scratch. Only model atchitecture and loss functions were used from the original repo.
+This is a framework that implements [D-FINE](https://arxiv.org/abs/2410.13842) architecture for object detection and adds a segmentation head, so you can train an object detection task or instance segmentation task. Detection architecture and loss used from the original [repo](https://github.com/Peterande/D-FINE), everything else was developed from scratch, this is not a fork.
 
 Check out [the video tutorial](https://youtu.be/_uEyRRw4miY) to get familiar with this framework.
+
+## Introducing Instance Segmentation
+
+This goes beyond the original paper and is developed specifically for this framework. Segmentation task is still an early feature and there are no pretrained weights for segentation head yet.
 
 ## Main scripts
 
@@ -27,14 +30,9 @@ For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and
 
 ## Usage example
 
-0. `git clone https://github.com/ArgoHA/custom_d_fine.git`
+0. `git clone https://github.com/ArgoHA/d_fine_seg.git`
 1. For bigger models (l, x) download from [gdrive](https://drive.google.com/drive/folders/1cjfMS_YV5LcoJsYi-fy0HWBZQU6eeP-7?usp=share_link) andput into `pretrained` folder
 2. Prepare your data: `images` folder and `labels` folder (txt file per image in YOLO format).
-```
-📂 data/dataset
-├── 📁 images
-├── 📁 labels
-```
 3. Customize `config.yaml`, minimal example:
       - `exp_name`. This is experiment name which is used in model's output folder. After you train a model, you can run export/bench/infer and it will use the model under this name + current date.
       - `root`. Path to the directory where you store your dataset and where model outputs will be saved
@@ -42,11 +40,10 @@ For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and
       - `label_to_name`. Your custom dataset classes
       - `model_name`. Choose from n/s/m/l/x model sizes.
       - and usual things like: epochs, batch_size, num_workers. Check out config.yaml for all configs.
-4. Run `preprocess` and `split` scripts from custom_d_fine repo.
+4. Run `preprocess` and `split` scripts from d_fine_seg repo.
 5. Run `train` script, changing confurations, iterating, untill you get desired results.
 6. Run `export`script to create ONNX, TensorRT, OpenVINO models.
 
-Use `config_.yaml` as a template with default configs.
 
 [Training example with Colab](https://colab.research.google.com/drive/1ZV12qnUQMpC0g3j-0G-tYhmmdM98a41X?usp=sharing)
 
@@ -56,6 +53,21 @@ If you run train script passing the args in the command and not changing them in
 python -m src.dl.train exp_name=my_experiment
 python -m src.dl.export exp_name=my_experiment
 ```
+
+## Labels format
+
+We use YOLO labels format. One txt file per image (with the same stem). One row = one object.
+
+```
+📂 data/dataset
+├── 📁 images
+├── 📁 labels
+```
+
+**Detection**: [class_id, xc, yc, w, h], coords normalized
+
+**Segmentation**: [class_id, xy, xy, ...], coords normalized. Length = number of points + 1
+
 
 ## Exporting tips
 

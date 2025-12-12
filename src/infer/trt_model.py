@@ -4,7 +4,6 @@ import cv2
 import numpy as np
 import tensorrt as trt
 import torch
-import torch.nn.functional as F
 from numpy.typing import NDArray
 
 
@@ -81,55 +80,65 @@ class TRT_model:
         for i in range(len(orig_sizes)):
             if keep_ratio:
                 final_boxes[i] = scale_boxes_ratio_kept(
-                    final_boxes[i],
-                    processed_sizes[i],
-                    orig_sizes[i],
+                    final_boxes[i], processed_sizes[i], orig_sizes[i]
                 )
             else:
-                final_boxes[i] = scale_boxes(
-                    final_boxes[i],
-                    orig_sizes[i],
-                    processed_sizes[i],
-                )
+                final_boxes[i] = scale_boxes(final_boxes[i], orig_sizes[i], processed_sizes[i])
         return torch.tensor(final_boxes).to(device)
 
-    def _preds_postprocess(
-        self,
-        outputs,
-        processed_sizes,
-        original_sizes,
-        num_top_queries=300,
-        use_focal_loss=True,
-    ) -> List[Dict[str, torch.Tensor]]:
+    @staticmethod
+    def process_masks(
+        pred_masks,  # Tensor [B, Q, Hm, Wm] or [Q, Hm, Wm]
+        processed_size,  # (H, W) of network input (after your A.Compose)
+        orig_sizes,  # Tensor [B, 2] (H, W)
+        keep_ratio: bool,
+    ) -> List[torch.Tensor]:
         """
-        returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
+        Returns list of length B with masks resized to original image sizes:
+        Each item: Float Tensor [Q, H_orig, W_orig] in [0,1] (no thresholding here).
+        - Handles letterbox padding removal if keep_ratio=True.
+        - Works for both batched and single-image inputs.
         """
-        logits, boxes = outputs[0], outputs[1]
-        boxes = self.process_boxes(
-            boxes, processed_sizes, original_sizes, self.keep_ratio, self.device
-        )  # B x TopQ x 4
+        single = pred_masks.dim() == 3  # [Q,Hm,Wm]
+        if single:
+            pred_masks = pred_masks.unsqueeze(0)  # -> [1,Q,Hm,Wm]
 
-        if use_focal_loss:
-            scores = torch.sigmoid(logits)
-            scores, index = torch.topk(scores.flatten(1), num_top_queries, dim=-1)
-            labels = index - index // self.n_outputs * self.n_outputs
-            index = index // self.n_outputs
-            boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
-        else:
-            scores = F.softmax(logits)[:, :, :-1]
-            scores, labels = scores.max(dim=-1)
-            if scores.shape[1] > num_top_queries:
-                scores, index = torch.topk(scores, num_top_queries, dim=-1)
-                labels = torch.gather(labels, dim=1, index=index)
-                boxes = torch.gather(
-                    boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1])
-                )
+        B, Q, Hm, Wm = pred_masks.shape
+        device = pred_masks.device
+        dtype = pred_masks.dtype
 
-        results = []
-        for lab, box, sco in zip(labels, boxes, scores):
-            result = dict(labels=lab, boxes=box, scores=sco)
-            results.append(result)
-        return results
+        # 1) Upsample masks to processed (input) size
+        proc_h, proc_w = int(processed_size[0]), int(processed_size[1])
+        masks_proc = torch.nn.functional.interpolate(
+            pred_masks, size=(proc_h, proc_w), mode="bilinear", align_corners=False
+        )  # [B,Q,Hp,Wp] with Hp=proc_h, Wp=proc_w
+
+        out = []
+        for b in range(B):
+            H0, W0 = int(orig_sizes[b, 0].item()), int(orig_sizes[b, 1].item())
+            m = masks_proc[b]  # [Q, Hp, Wp]
+            if keep_ratio:
+                # Compute same gain/pad as in scale_boxes_ratio_kept
+                gain = min(proc_h / H0, proc_w / W0)
+                padw = round((proc_w - W0 * gain) / 2 - 0.1)
+                padh = round((proc_h - H0 * gain) / 2 - 0.1)
+
+                # Remove padding before final resize
+                y1 = max(padh, 0)
+                y2 = proc_h - max(padh, 0)
+                x1 = max(padw, 0)
+                x2 = proc_w - max(padw, 0)
+                m = m[:, y1:y2, x1:x2]  # [Q, cropped_h, cropped_w]
+
+            # 2) Resize to original size
+            m = torch.nn.functional.interpolate(
+                m.unsqueeze(0), size=(H0, W0), mode="bilinear", align_corners=False
+            ).squeeze(0)  # [Q, H0, W0]
+            out.append(m.clamp_(0, 1).to(device=device, dtype=dtype))
+
+        if single:
+            return [out[0]]
+        return out
 
     def _compute_nearest_size(self, shape, target_size, stride=32) -> Tuple[int, int]:
         """
@@ -229,18 +238,83 @@ class TRT_model:
 
     def _postprocess(
         self,
-        preds: torch.tensor,
+        outputs: torch.Tensor,
         processed_sizes: List[Tuple[int, int]],
         original_sizes: List[Tuple[int, int]],
-    ):
-        output = self._preds_postprocess(preds, processed_sizes, original_sizes)
-        output = filter_preds(output, self.conf_threshs)
+        num_top_queries=300,
+        use_focal_loss=True,
+    ) -> List[Dict[str, NDArray]]:
+        """
+        returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
+        """
+        logits, boxes = outputs[0], outputs[1]
+        has_masks = len(outputs) > 2 and outputs[2] is not None
+        pred_masks = outputs[2] if has_masks else None  # [B,Q,Hm,Wm]
+        B, Q = logits.shape[:2]
 
-        for res in output:
-            res["labels"] = res["labels"].cpu().numpy()
-            res["boxes"] = res["boxes"].cpu().numpy()
-            res["scores"] = res["scores"].cpu().numpy()
-        return output
+        boxes = self.process_boxes(
+            boxes, processed_sizes, original_sizes, self.keep_ratio, self.device
+        )  # B x TopQ x 4
+
+        # scores/labels and preliminary topK over all Q*C
+        if use_focal_loss:
+            scores_all = torch.sigmoid(logits)  # [B,Q,C]
+            flat = scores_all.flatten(1)  # [B, Q*C]
+            # pre-topk to avoid scanning all queries later
+            K = min(num_top_queries, flat.shape[1])
+            topk_scores, topk_idx = torch.topk(flat, K, dim=-1)  # [B,K]
+            topk_labels = topk_idx - (topk_idx // self.n_outputs) * self.n_outputs  # [B,K]
+            topk_qidx = topk_idx // self.n_outputs  # [B,K]
+        else:
+            probs = torch.softmax(logits, dim=-1)[:, :, :-1]  # [B,Q,C-1]
+            topk_scores, topk_labels = probs.max(dim=-1)  # [B,Q]
+            # keep at most K queries per image by score
+            K = min(num_top_queries, Q)
+            topk_scores, order = torch.topk(topk_scores, K, dim=-1)  # [B,K]
+            topk_labels = topk_labels.gather(1, order)  # [B,K]
+            topk_qidx = order
+
+        results = []
+        for b in range(B):
+            sb = topk_scores[b]
+            lb = topk_labels[b]
+            qb = topk_qidx[b]
+            # Apply per-class confidence thresholds
+            conf_threshs_tensor = torch.tensor(self.conf_threshs, device=sb.device)
+            keep = sb >= conf_threshs_tensor[lb]
+
+            sb = sb[keep]
+            lb = lb[keep]
+            qb = qb[keep]
+            # gather boxes once
+            bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
+
+            out = {
+                "labels": lb.detach().cpu().numpy(),
+                "boxes": bb.detach().cpu().numpy(),
+                "scores": sb.detach().cpu().numpy(),
+            }
+
+            if has_masks and qb.numel() > 0:
+                # gather only kept masks, then cast to half to save mem during resizing
+                mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
+                mb = mb.to(dtype=torch.float16)  # reduce VRAM and RAM during resize
+                # resize to original size (list of length 1)
+                masks_list = self.process_masks(
+                    mb.unsqueeze(0),  # [1,K',Hm,Wm]
+                    processed_size=np.array(processed_sizes[b]),  # (Hin, Win)
+                    orig_sizes=np.array(original_sizes[b])[None],  # [1,2]
+                    keep_ratio=self.keep_ratio,
+                )
+                out["mask_probs"] = (
+                    masks_list[0].to(dtype=torch.float32).detach().cpu().numpy()
+                )  # [B, H, W]
+                # clean up masks outside of the corresponding bbox
+                out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
+
+            results.append(out)
+
+        return results
 
     def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, np.ndarray]]:
         """
@@ -250,6 +324,7 @@ class TRT_model:
             labels: np.ndarray of shape (N,), dtype np.int64
             boxes: np.ndarray of shape (N, 4), dtype np.float32, abs values
             scores: np.ndarray of shape (N,), dtype np.float32
+            masks: np.ndarray of shape (N, H, W), dtype np.uint8. N = number of objects
         """
         processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(inputs)
         preds = self._predict(processed_inputs)
@@ -371,11 +446,18 @@ def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int, to_round=T
         return np.stack([x_min, y_min, x_max, y_max], axis=1)
 
 
-def filter_preds(preds, conf_threshs: List[float]):
-    conf_threshs = torch.tensor(conf_threshs, device=preds[0]["scores"].device)
-    for pred in preds:
-        mask = pred["scores"] >= conf_threshs[pred["labels"]]
-        pred["scores"] = pred["scores"][mask]
-        pred["boxes"] = pred["boxes"][mask]
-        pred["labels"] = pred["labels"][mask]
-    return preds
+def cleanup_masks(masks, boxes):
+    # clean up masks outside of the corresponding bbox
+    N, H, W = masks.shape
+    ys = np.arange(H)[None, :, None]  # (1, H, 1)
+    xs = np.arange(W)[None, None, :]  # (1, 1, W)
+
+    x1, y1, x2, y2 = boxes.T
+    inside = (
+        (xs >= x1[:, None, None])
+        & (xs < x2[:, None, None])
+        & (ys >= y1[:, None, None])
+        & (ys < y2[:, None, None])
+    )  # (N, H, W), bool
+    masks = masks * inside.astype(masks.dtype)
+    return masks

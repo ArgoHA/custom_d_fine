@@ -14,13 +14,14 @@ from torch import nn
 from src.d_fine.dfine import build_model
 from src.dl.utils import get_latest_experiment_name
 
-INPUT_NAME = "input"
-OUTPUT_NAMES = ["logits", "boxes"]
-
 
 def prepare_model(cfg, device):
     model = build_model(
-        cfg.model_name, len(cfg.train.label_to_name), device, img_size=cfg.train.img_size
+        cfg.model_name,
+        len(cfg.train.label_to_name),
+        enable_mask_head=cfg.task == "segment",
+        device=device,
+        img_size=cfg.train.img_size,
     )
     model.load_state_dict(torch.load(Path(cfg.train.path_to_save) / "model.pt", weights_only=True))
     model.eval()
@@ -34,26 +35,31 @@ def export_to_onnx(
     max_batch_size: int,
     half: bool,
     dynamic_input: bool,
+    input_name: str,
+    output_names: list[str],
+    enable_mask_head: bool,
 ) -> None:
     dynamic_axes = {}
     if max_batch_size > 1:
         dynamic_axes = {
-            INPUT_NAME: {0: "batch_size"},
-            OUTPUT_NAMES[0]: {0: "batch_size"},
-            OUTPUT_NAMES[1]: {0: "batch_size"},
+            input_name: {0: "batch_size"},
+            output_names[0]: {0: "batch_size"},
+            output_names[1]: {0: "batch_size"},
         }
+    if enable_mask_head:
+        dynamic_axes[output_names[2]] = {0: "batch_size"}
     if dynamic_input:
-        if INPUT_NAME not in dynamic_axes:
-            dynamic_axes[INPUT_NAME] = {}
-        dynamic_axes[INPUT_NAME].update({2: "height", 3: "width"})
+        if input_name not in dynamic_axes:
+            dynamic_axes[input_name] = {}
+        dynamic_axes[input_name].update({2: "height", 3: "width"})
 
     output_path = model_path.with_suffix(".onnx")
     torch.onnx.export(
         model,
         x_test,
         opset_version=19,
-        input_names=[INPUT_NAME],
-        output_names=OUTPUT_NAMES,
+        input_names=[input_name],
+        output_names=output_names,
         dynamic_axes=dynamic_axes if dynamic_axes else None,
         dynamo=True,
     ).save(output_path)
@@ -107,24 +113,69 @@ def export_to_tensorrt(
             return
 
     config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)  # 1GB
+    # Increase workspace memory to help with larger batch sizes
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)  # 2GB
     if half:
         config.set_flag(trt.BuilderFlag.FP16)
 
     if max_batch_size > 1:
         profile = builder.create_optimization_profile()
-        input_name = network.get_input(0).name
-        input_shape = network.get_input(0).shape  # e.g., [batch, channels, height, width]
+        input_tensor = network.get_input(0)
+        input_name = input_tensor.name
+
+        # Load ONNX model to get the actual input shape information
+        onnx_model = onnx.load(str(onnx_file_path))
+
+        # Find the input by name to ensure we get the correct one
+        input_shape_proto = None
+        for inp in onnx_model.graph.input:
+            if inp.name == input_name:
+                input_shape_proto = inp.type.tensor_type.shape
+                break
+
+        if input_shape_proto is None:
+            raise ValueError(
+                f"Could not find input '{input_name}' in ONNX model. "
+                f"Available inputs: {[inp.name for inp in onnx_model.graph.input]}"
+            )
+
+        # Extract static dimensions from ONNX model
+        # The first dimension (batch) should be dynamic, others should be static
+        static_dims = []
+        for i, dim in enumerate(input_shape_proto.dim[1:], start=1):  # Skip batch dimension
+            if dim.dim_value:
+                # Static dimension
+                static_dims.append(int(dim.dim_value))
+            elif dim.dim_param:
+                # Dynamic dimension (not allowed for non-batch dims in this case)
+                raise ValueError(
+                    f"Cannot create TensorRT optimization profile: input shape has dynamic "
+                    f"dimension at index {i} (beyond batch). Only batch dimension can be dynamic."
+                )
+            else:
+                raise ValueError(
+                    f"Cannot create TensorRT optimization profile: input shape dimension at "
+                    f"index {i} is undefined."
+                )
 
         # Set the minimum and optimal batch size to 1, and allow the maximum batch size as provided.
-        min_shape = (1, *input_shape[1:])
-        opt_shape = (1, *input_shape[1:])
-        max_shape = (max_batch_size, *input_shape[1:])
+        min_shape = (1, *static_dims)
+        opt_shape = (1, *static_dims)
+        max_shape = (max_batch_size, *static_dims)
 
         profile.set_shape(input_name, min_shape, opt_shape, max_shape)
         config.add_optimization_profile(profile)
 
     engine = builder.build_serialized_network(network, config)
+    if engine is None:
+        raise RuntimeError(
+            "Failed to build TensorRT engine. This can happen due to:\n"
+            "1. Insufficient GPU memory\n"
+            "2. Unsupported operations in the ONNX model\n"
+            "3. Issues with dynamic batch size configuration\n"
+            "Check the TensorRT logs above for more details."
+        )
+
     with open(onnx_file_path.with_suffix(".engine"), "wb") as f:
         f.write(engine)
     logger.info("TensorRT model exported")
@@ -132,6 +183,12 @@ def export_to_tensorrt(
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
 def main(cfg: DictConfig):
+    input_name = "input"
+    output_names = ["logits", "boxes"]
+    enable_mask_head = cfg.task == "segment"
+    if enable_mask_head:
+        output_names.append("mask_probs")
+
     device = cfg.train.device
     cfg.exp = get_latest_experiment_name(cfg.exp, cfg.train.path_to_save)
 
@@ -148,6 +205,9 @@ def main(cfg: DictConfig):
         cfg.export.max_batch_size,
         half=False,
         dynamic_input=False,
+        input_name=input_name,
+        output_names=output_names,
+        enable_mask_head=enable_mask_head,
     )
 
     export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)

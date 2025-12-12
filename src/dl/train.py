@@ -8,7 +8,6 @@ from typing import Dict, List, Tuple
 import hydra
 import numpy as np
 import torch
-import torch.nn.functional as F
 import wandb
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
@@ -34,11 +33,12 @@ from src.d_fine.dist_utils import (
 from src.dl.dataset import Loader
 from src.dl.utils import (
     calculate_remaining_time,
-    filter_preds,
+    cleanup_masks,
     get_latest_experiment_name,
     get_vram_usage,
     log_metrics_locally,
     process_boxes,
+    process_masks,
     save_metrics,
     set_seeds,
     visualize,
@@ -101,6 +101,8 @@ class Trainer:
         self.use_wandb = cfg.train.use_wandb
         self.label_to_name = cfg.train.label_to_name
         self.num_labels = len(cfg.train.label_to_name)
+        self.task = cfg.task  # detect/segment
+        enable_mask_head = self.task == "segment"
 
         self.debug_img_path = Path(self.cfg.train.debug_img_path)
         self.eval_preds_path = Path(self.cfg.train.eval_preds_path)
@@ -109,6 +111,8 @@ class Trainer:
         if self.is_main:
             self.init_dirs()
 
+        if enable_mask_head and "iou" not in self.decision_metrics:
+            self.decision_metrics.append("iou")
         if self.use_wandb and self.is_main:
             wandb.init(
                 project=cfg.project_name,
@@ -121,6 +125,7 @@ class Trainer:
             log_file.unlink(missing_ok=True)
             logger.add(log_file, format="{message}", level="INFO", rotation="10 MB")
 
+        logger.info(f"Training task: {self.task}")
         seed = cfg.train.seed + self.rank if self.distributed else cfg.train.seed
         set_seeds(seed, cfg.train.cudnn_fixed)
 
@@ -142,7 +147,8 @@ class Trainer:
         self.model = build_model(
             cfg.model_name,
             self.num_labels,
-            self.device,
+            enable_mask_head,
+            str(self.device),
             img_size=cfg.train.img_size,
             pretrained_model_path=cfg.train.pretrained_model_path,
         )
@@ -167,7 +173,10 @@ class Trainer:
                 logger.info("EMA model will be evaluated and saved")
 
         self.loss_fn = build_loss(
-            cfg.model_name, self.num_labels, label_smoothing=cfg.train.label_smoothing
+            cfg.model_name,
+            self.num_labels,
+            label_smoothing=cfg.train.label_smoothing,
+            enable_mask_head=enable_mask_head,
         )
 
         self.optimizer = build_optimizer(
@@ -219,6 +228,7 @@ class Trainer:
         orig_sizes: torch.Tensor,
         num_labels: int,
         keep_ratio: bool,
+        conf_thresh: float,
         num_top_queries: int = 300,
         use_focal_loss: bool = True,
     ) -> List[Dict[str, torch.Tensor]]:
@@ -226,32 +236,85 @@ class Trainer:
         returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
         """
         logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
+        has_masks = ("pred_masks" in outputs) and (outputs["pred_masks"] is not None)
+        pred_masks = outputs["pred_masks"] if has_masks else None  # [B,Q,Hm,Wm]
+        B, Q = logits.shape[:2]
+
+        # Map boxes back to original size
         boxes = process_boxes(
             boxes, inputs.shape[2:], orig_sizes, keep_ratio, inputs.device
         )  # B x TopQ x 4
 
+        # scores/labels and preliminary topK over all Q*C
         if use_focal_loss:
-            scores = torch.sigmoid(logits)
-            scores, index = torch.topk(scores.flatten(1), num_top_queries, dim=-1)
-            labels = index - index // num_labels * num_labels
-            index = index // num_labels
-            boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+            scores_all = torch.sigmoid(logits)  # [B,Q,C]
+            flat = scores_all.flatten(1)  # [B, Q*C]
+            # pre-topk to avoid scanning all queries later
+            K = min(num_top_queries, flat.shape[1])
+            topk_scores, topk_idx = torch.topk(flat, K, dim=-1)  # [B,K]
+            topk_labels = topk_idx - (topk_idx // num_labels) * num_labels  # [B,K]
+            topk_qidx = topk_idx // num_labels  # [B,K]
         else:
-            scores = F.softmax(logits)[:, :, :-1]
-            scores, labels = scores.max(dim=-1)
-            if scores.shape[1] > num_top_queries:
-                scores, index = torch.topk(scores, num_top_queries, dim=-1)
-                labels = torch.gather(labels, dim=1, index=index)
-                boxes = torch.gather(
-                    boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1])
-                )
+            probs = torch.softmax(logits, dim=-1)[:, :, :-1]  # [B,Q,C-1]
+            topk_scores, topk_labels = probs.max(dim=-1)  # [B,Q]
+            # keep at most K queries per image by score
+            K = min(num_top_queries, Q)
+            topk_scores, order = torch.topk(topk_scores, K, dim=-1)  # [B,K]
+            topk_labels = topk_labels.gather(1, order)  # [B,K]
+            topk_qidx = order
 
-        results: List[Dict[str, torch.Tensor]] = []
-        for lab, box, sco in zip(labels, boxes, scores):
-            result = dict(
-                labels=lab.detach().cpu(), boxes=box.detach().cpu(), scores=sco.detach().cpu()
-            )
-            results.append(result)
+        results = []
+        for b in range(B):
+            # Filter by conf thresh, but keep boxes for mAP calc
+            sb = topk_scores[b]
+            lb = topk_labels[b]
+            qb = topk_qidx[b]
+            keep = sb >= conf_thresh
+
+            sb = sb[keep]
+            lb = lb[keep]
+            qb = qb[keep]
+            # gather boxes once
+            bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
+
+            # gather all_boxes using topk query indices to match all_scores/all_labels ordering
+            all_bb = boxes[b].gather(0, topk_qidx[b].unsqueeze(-1).repeat(1, 4))
+
+            out = {
+                "labels": lb.detach().cpu(),
+                "boxes": bb.detach().cpu(),
+                "scores": sb.detach().cpu(),
+                "all_boxes": all_bb.detach().cpu(),
+                "all_scores": topk_scores[b].detach().cpu(),
+                "all_labels": topk_labels[b].detach().cpu(),
+            }
+
+            if has_masks and qb.numel() > 0:
+                # gather only kept masks, cast to half to save mem during resizing
+                mb = pred_masks[b, qb]
+                mb = mb.to(dtype=torch.float16)  # reduce VRAM and RAM during resize
+                # resize to original size (list with length 1)
+                masks_list = process_masks(
+                    mb.unsqueeze(0),
+                    processed_size=inputs.shape[2:],
+                    orig_sizes=orig_sizes[b].unsqueeze(0),
+                    keep_ratio=keep_ratio,
+                )
+                out["mask_probs"] = (
+                    masks_list[0].to(dtype=torch.float32).detach().cpu()
+                )  # [K',H0,W0]
+
+                # binarize masks
+                out["masks"] = (
+                    (masks_list[0].clamp(0, 1) >= conf_thresh).to(torch.uint8).detach().cpu()
+                )  # [B, H, W]
+
+                # clean up masks outside of the corresponding bbox
+                out["masks"] = cleanup_masks(out["masks"], out["boxes"])
+
+                del out["mask_probs"]
+
+            results.append(out)
         return results
 
     @staticmethod
@@ -267,6 +330,32 @@ class Trainer:
                 inputs.device,
             )
             result = dict(labels=lab.detach().cpu(), boxes=box.squeeze(0).detach().cpu())
+
+            # GT masks come from dataset already rasterized at network size; map to original size
+            if (
+                "masks" in targets[idx]
+                and targets[idx]["masks"] is not None
+                and targets[idx]["masks"].numel() > 0
+            ):
+                gt_m = targets[idx]["masks"].to(
+                    dtype=inputs.dtype, device=inputs.device
+                )  # [Ni,Hnet,Wnet]
+                gt_m = gt_m.unsqueeze(0)  # [1,Ni,Hnet,Wnet] to match helper API
+                # Helper expects [B,Q,Hm,Wm]; we pass B=1, Q=Ni
+                masks_list = process_masks(
+                    gt_m,
+                    processed_size=inputs[idx].shape[1:],  # (Hnet, Wnet)
+                    orig_sizes=orig_sizes[idx].unsqueeze(0),  # [1,2]
+                    keep_ratio=keep_ratio,
+                )
+                # back to [Ni,H0,W0] and uint8
+                result["masks"] = (masks_list[0].clamp(0, 1) >= 0.5).to(torch.uint8).detach().cpu()
+            else:
+                result["masks"] = torch.zeros(
+                    (0, int(orig_sizes[idx, 0].item()), int(orig_sizes[idx, 1].item())),
+                    dtype=torch.uint8,
+                )
+
             results.append(result)
         return results
 
@@ -284,67 +373,47 @@ class Trainer:
             model = self.ema_model.model
 
         model.eval()
-        for idx, (inputs, targets, img_paths) in enumerate(val_loader):
-            inputs = inputs.to(self.device)
-            if self.amp_enabled:
-                with autocast(str(self.device), cache_enabled=True):
+        with torch.inference_mode():
+            for idx, (inputs, targets, img_paths) in enumerate(val_loader):
+                inputs = inputs.to(self.device)
+                if self.amp_enabled:
+                    with autocast(str(self.device), cache_enabled=True):
+                        raw_res = model(inputs)
+                else:
                     raw_res = model(inputs)
-            else:
-                raw_res = model(inputs)
 
-            targets = [
-                {
-                    k: (v.to(self.device) if (v is not None and hasattr(v, "to")) else v)
-                    for k, v in t.items()
-                }
-                for t in targets
-            ]
-            orig_sizes = (
-                torch.stack([t["orig_size"] for t in targets], dim=0).float().to(self.device)
-            )
-
-            preds = self.preds_postprocess(
-                inputs, raw_res, orig_sizes, self.num_labels, self.keep_ratio
-            )
-            gt = self.gt_postprocess(inputs, targets, orig_sizes, self.keep_ratio)
-
-            for pred_instance, gt_instance in zip(preds, gt):
-                all_preds.append(pred_instance)
-                all_gt.append(gt_instance)
-
-            if self.to_visualize_eval and idx <= 5:
-                visualize(
-                    img_paths,
-                    gt,
-                    filter_preds(preds, self.conf_thresh),
-                    dataset_path=Path(self.cfg.train.data_path) / "images",
-                    path_to_save=self.eval_preds_path,
-                    label_to_name=self.label_to_name,
+                targets = [
+                    {
+                        k: (v.to(self.device) if (v is not None and hasattr(v, "to")) else v)
+                        for k, v in t.items()
+                    }
+                    for t in targets
+                ]
+                orig_sizes = (
+                    torch.stack([t["orig_size"] for t in targets], dim=0).float().to(self.device)
                 )
-        return all_gt, all_preds
 
-    @staticmethod
-    def get_metrics(
-        gt,
-        preds,
-        conf_thresh: float,
-        iou_thresh: float,
-        extended: bool,
-        label_to_name: Dict[int, str],
-        path_to_save=None,
-        mode=None,
-    ):
-        validator = Validator(
-            gt,
-            preds,
-            conf_thresh=conf_thresh,
-            iou_thresh=iou_thresh,
-            label_to_name=label_to_name,
-        )
-        metrics = validator.compute_metrics(extended=extended)
-        if path_to_save:  # val and test
-            validator.save_plots(path_to_save / "plots" / mode)
-        return metrics
+                gt = self.gt_postprocess(inputs, targets, orig_sizes, self.keep_ratio)
+                preds = self.preds_postprocess(
+                    inputs, raw_res, orig_sizes, self.num_labels, self.keep_ratio, self.conf_thresh
+                )
+
+                # collect all preds and gt for metrics
+                for gt_instance, pred_instance in zip(gt, preds):
+                    all_preds.append(pred_instance)
+                    all_gt.append(gt_instance)
+
+                if self.to_visualize_eval and idx <= 5:
+                    visualize(
+                        img_paths,
+                        gt,
+                        preds,
+                        dataset_path=Path(self.cfg.train.data_path) / "images",
+                        path_to_save=self.eval_preds_path,
+                        label_to_name=self.label_to_name,
+                    )
+
+        return all_gt, all_preds
 
     def evaluate(
         self,
@@ -368,16 +437,16 @@ class Trainer:
         # Only rank 0 computes metrics
         metrics = None
         if self.is_main and all_preds is not None and all_gt is not None:
-            metrics = self.get_metrics(
+            validator = Validator(
                 all_gt,
                 all_preds,
-                conf_thresh,
-                iou_thresh,
-                extended=extended,
+                conf_thresh=conf_thresh,
+                iou_thresh=iou_thresh,
                 label_to_name=self.label_to_name,
-                path_to_save=path_to_save,
-                mode=mode,
             )
+            metrics = validator.compute_metrics(extended=extended)
+            if path_to_save:  # val and test
+                validator.save_plots(path_to_save / "plots" / mode)
 
         # Synchronize before returning so all ranks wait for metrics computation
         if self.distributed:
@@ -588,6 +657,7 @@ def main(cfg: DictConfig) -> None:
             model = build_model(
                 cfg.model_name,
                 len(cfg.train.label_to_name),
+                cfg.task == "segment",
                 cfg.train.device,
                 img_size=cfg.train.img_size,
             )

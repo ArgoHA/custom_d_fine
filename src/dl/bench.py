@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.dl.dataset import CustomDataset, Loader
-from src.dl.utils import get_latest_experiment_name, process_boxes, vis_one_box
+from src.dl.utils import get_latest_experiment_name, process_boxes, process_masks, visualize
 from src.dl.validator import Validator
 from src.infer.onnx_model import ONNX_model
 from src.infer.ov_model import OV_model
@@ -52,33 +52,6 @@ class BenchLoader(Loader):
         return val_loader, test_loader
 
 
-def visualize(
-    img,
-    gt_boxes,
-    pred_boxes,
-    gt_labels,
-    pred_labels,
-    pred_scores,
-    output_path,
-    img_path,
-    label_to_name,
-):
-    for gt_box, gt_label in zip(gt_boxes, gt_labels):
-        vis_one_box(img, gt_box, gt_label, mode="gt", label_to_name=label_to_name)
-
-    for pred_box, pred_label, score in zip(pred_boxes, pred_labels, pred_scores):
-        vis_one_box(
-            img,
-            pred_box,
-            pred_label,
-            mode="pred",
-            label_to_name=label_to_name,
-            score=score,
-        )
-
-    cv2.imwrite((str(f"{output_path / Path(img_path).stem}.jpg")), img)
-
-
 def test_model(
     test_loader: DataLoader,
     data_path: Path,
@@ -94,16 +67,19 @@ def test_model(
     label_to_name: Dict[int, str],
 ):
     logger.info(f"Testing {name} model")
-    gt = []
-    preds = []
     latency = []
     batch = 0
+    all_gt = []
+    all_preds = []
 
     output_path = output_path / name
     output_path.mkdir(exist_ok=True, parents=True)
 
     for _, targets, img_paths in tqdm(test_loader, total=len(test_loader)):
         for img_path, targets in zip(img_paths, targets):
+            img = cv2.imread(str(data_path / "images" / img_path))
+
+            # laod GT
             gt_boxes = process_boxes(
                 targets["boxes"][None],
                 processed_size,
@@ -111,38 +87,51 @@ def test_model(
                 keep_ratio,
                 device,
             )[batch].cpu()
+
             gt_labels = targets["labels"]
 
-            img = cv2.imread(str(data_path / "images" / img_path))
+            if "masks" in targets:
+                gt_masks = process_masks(
+                    targets["masks"][None], processed_size, targets["orig_size"][None], keep_ratio
+                )[batch].cpu()
+
+            # inference
             t0 = time.perf_counter()
             model_preds = model(img)
             latency.append((time.perf_counter() - t0) * 1000)
 
-            gt.append({"boxes": gt_boxes, "labels": gt_labels.int()})
-            preds.append(
-                {
-                    "boxes": torch.tensor(model_preds[batch]["boxes"]),
-                    "labels": torch.tensor(model_preds[batch]["labels"]),
-                    "scores": torch.tensor(model_preds[batch]["scores"]),
-                }
-            )
+            # prepare preds
+            gt_dict = {"boxes": gt_boxes, "labels": gt_labels.int()}
+            if "masks" in targets:
+                gt_dict["masks"] = gt_masks
+            all_gt.append(gt_dict)
+
+            pred_dict = {
+                "boxes": torch.from_numpy(model_preds[batch]["boxes"]),
+                "labels": torch.from_numpy(model_preds[batch]["labels"]),
+                "scores": torch.from_numpy(model_preds[batch]["scores"]),
+            }
+            if "mask_probs" in model_preds[batch]:
+                # Binarize
+                pred_dict["masks"] = torch.from_numpy(
+                    model_preds[batch]["mask_probs"] >= conf_thresh
+                ).to(torch.uint8)
+
+            all_preds.append(pred_dict)
 
             if to_visualize:
                 visualize(
-                    img=img,
-                    gt_boxes=gt_boxes,
-                    pred_boxes=model_preds[batch]["boxes"],
-                    gt_labels=gt_labels,
-                    pred_labels=model_preds[batch]["labels"],
-                    pred_scores=model_preds[batch]["scores"],
-                    output_path=output_path,
-                    img_path=img_path,
+                    img_paths,
+                    [gt_dict],
+                    [pred_dict],
+                    dataset_path=data_path / "images",
+                    path_to_save=output_path,
                     label_to_name=label_to_name,
                 )
 
     validator = Validator(
-        gt,
-        preds,
+        all_gt,
+        all_preds,
         conf_thresh=conf_thresh,
         iou_thresh=iou_thresh,
         label_to_name=label_to_name,
@@ -173,6 +162,7 @@ def main(cfg: DictConfig):
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
+        enable_mask_head=cfg.task == "segment",
     )
 
     trt_model = TRT_model(
