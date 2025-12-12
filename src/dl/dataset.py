@@ -17,6 +17,7 @@ from src.d_fine.dist_utils import is_main_process
 from src.dl.utils import (
     LetterboxRect,
     abs_xyxy_to_norm_xywh,
+    clip_polygon_to_rect,
     get_mosaic_coordinate,
     norm_poly_to_abs,
     norm_xywh_to_abs_xyxy,
@@ -299,10 +300,36 @@ class CustomDataset(Dataset):
 
         if len(mosaic_targets):
             mosaic_targets = np.concatenate(mosaic_targets, 0)
-            np.clip(mosaic_targets[:, 1], 0, 2 * self.target_w, out=mosaic_targets[:, 1])
-            np.clip(mosaic_targets[:, 2], 0, 2 * self.target_h, out=mosaic_targets[:, 2])
-            np.clip(mosaic_targets[:, 3], 0, 2 * self.target_w, out=mosaic_targets[:, 3])
-            np.clip(mosaic_targets[:, 4], 0, 2 * self.target_h, out=mosaic_targets[:, 4])
+
+            # Clip polygons to the mosaic canvas and update bboxes from clipped polygons
+            canvas_w, canvas_h = 2 * self.target_w, 2 * self.target_h
+            clipped_segments = []
+            valid_indices = []
+            for i, poly in enumerate(mosaic_segments):
+                if poly.size == 0:
+                    clipped_segments.append(np.empty((0, 2), dtype=np.float32))
+                    valid_indices.append(i)
+                    continue
+                clipped = clip_polygon_to_rect(poly, canvas_w, canvas_h)
+                if clipped.size >= 6:  # At least 3 points for a valid polygon
+                    clipped_segments.append(clipped)
+                    valid_indices.append(i)
+                    # Update bbox from clipped polygon
+                    x_min, y_min = clipped.min(axis=0)
+                    x_max, y_max = clipped.max(axis=0)
+                    mosaic_targets[i, 1:5] = [x_min, y_min, x_max, y_max]
+                else:
+                    # Polygon became invalid after clipping, mark for removal
+                    clipped_segments.append(np.empty((0, 2), dtype=np.float32))
+                    valid_indices.append(i)
+
+            mosaic_segments = clipped_segments
+
+            # Clip bboxes (for detection-only annotations that don't have polygons)
+            np.clip(mosaic_targets[:, 1], 0, canvas_w, out=mosaic_targets[:, 1])
+            np.clip(mosaic_targets[:, 2], 0, canvas_h, out=mosaic_targets[:, 2])
+            np.clip(mosaic_targets[:, 3], 0, canvas_w, out=mosaic_targets[:, 3])
+            np.clip(mosaic_targets[:, 4], 0, canvas_h, out=mosaic_targets[:, 4])
 
         mosaic_img, mosaic_targets, mosaic_segs = random_affine(
             mosaic_img,

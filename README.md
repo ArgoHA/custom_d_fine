@@ -6,7 +6,7 @@ Check out [the video tutorial](https://youtu.be/_uEyRRw4miY) to get familiar wit
 
 ## Introducing Instance Segmentation
 
-This goes beyond the original paper and is developed specifically for this framework. Segmentation task is still an early feature and there are no pretrained weights for segentation head yet. Note that Mosaic augmentation is not implemented for segmentation yet, so turn it off during training
+This goes beyond the original paper and is developed specifically for this framework. Segmentation task is still an early feature and there are no pretrained weights for segentation head yet. Mosaic augmentation is not recommended for segmentation at this moment.
 
 ## Main scripts
 

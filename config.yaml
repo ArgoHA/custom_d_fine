@@ -55,12 +55,12 @@ train:
   amp_enabled: True # use automatic mixed precision
   clip_max_norm: 0.1 # gradient clipping
 
-  batch_size: 8 # physical, should fit on the device
+  batch_size: 8 # physical, should fit on the device. In DDP used per GPU
   b_accum_steps: 1 # grad accumulation (n * bs)
   epochs: 55
   early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
-  num_workers: 12
+  num_workers: 12 # In DDP used per GPU
 
   ### Validation ###
   conf_thresh: 0.5
@@ -79,8 +79,8 @@ train:
   label_smoothing: 0.0
 
   ### Augs ###
-  mosaic_augs:
-    mosaic_prob: 0.8
+  mosaic_augs: # not recommended for segmentation
+    mosaic_prob: 0.8 # set to 0 to disable
     no_mosaic_epochs: 5
     mosaic_scale: [0.5, 1.5]
     degrees: 0.0 # not recommended if bbox precision is critical

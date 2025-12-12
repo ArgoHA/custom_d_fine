@@ -210,6 +210,64 @@ def resample_segments(segments, n=1000):
     return segments
 
 
+def clip_polygon_to_rect(poly: np.ndarray, width: float, height: float) -> np.ndarray:
+    """
+    Clip a polygon to a rectangle [0, width] x [0, height] using Sutherland-Hodgman algorithm.
+    Returns the clipped polygon as (M, 2) array, or empty (0, 2) if fully outside.
+    """
+    if poly.size == 0:
+        return np.empty((0, 2), dtype=np.float32)
+
+    def inside(p, edge):
+        x, y = p
+        if edge == "left":
+            return x >= 0
+        elif edge == "right":
+            return x <= width
+        elif edge == "top":
+            return y >= 0
+        elif edge == "bottom":
+            return y <= height
+
+    def intersection(p1, p2, edge):
+        x1, y1 = p1
+        x2, y2 = p2
+        dx, dy = x2 - x1, y2 - y1
+        if edge == "left":
+            t = (0 - x1) / dx if dx != 0 else 0
+            return np.array([0, y1 + t * dy])
+        elif edge == "right":
+            t = (width - x1) / dx if dx != 0 else 0
+            return np.array([width, y1 + t * dy])
+        elif edge == "top":
+            t = (0 - y1) / dy if dy != 0 else 0
+            return np.array([x1 + t * dx, 0])
+        elif edge == "bottom":
+            t = (height - y1) / dy if dy != 0 else 0
+            return np.array([x1 + t * dx, height])
+
+    output = poly.copy()
+    for edge in ["left", "right", "top", "bottom"]:
+        if len(output) == 0:
+            return np.empty((0, 2), dtype=np.float32)
+        input_list = output
+        output = []
+        for i in range(len(input_list)):
+            current = input_list[i]
+            prev = input_list[i - 1]
+            if inside(current, edge):
+                if not inside(prev, edge):
+                    output.append(intersection(prev, current, edge))
+                output.append(current)
+            elif inside(prev, edge):
+                output.append(intersection(prev, current, edge))
+        output = np.array(output) if len(output) > 0 else np.empty((0, 2), dtype=np.float32)
+
+    if len(output) < 3:
+        return np.empty((0, 2), dtype=np.float32)
+    return output.astype(np.float32)
+
+
 def segment2box(segment, width=640, height=640):
     # Convert 1 segment label to 1 box label, applying inside-image constraint,
     # i.e. (xy1, xy2, ...) to (xyxy)
@@ -299,17 +357,23 @@ def random_affine(img, targets, segments, target_size, degrees, translate, scale
             segs_out = [np.empty((0, 2), dtype=np.float32) for _ in range(n)]
         else:
             # keep 1:1 with targets
-            for s in segments:
+            for idx, s in enumerate(segments):
                 if s.size == 0:
                     segs_out.append(np.empty((0, 2), dtype=np.float32))
                     continue
                 pts = np.concatenate([s, np.ones((len(s), 1), dtype=np.float32)], axis=1)  # (K,3)
                 pts = pts @ M.T
                 pts = pts[:, :2]
-                # clip to frame (optional but helps rasterizer)
-                pts[:, 0] = np.clip(pts[:, 0], 0, target_size[0])
-                pts[:, 1] = np.clip(pts[:, 1], 0, target_size[1])
-                segs_out.append(pts.astype(np.float32))
+                # Properly clip polygon to the target frame
+                clipped = clip_polygon_to_rect(pts, target_size[0], target_size[1])
+                if clipped.size >= 6:  # At least 3 points for a valid polygon
+                    segs_out.append(clipped)
+                    # Update bounding box from clipped polygon
+                    x_min, y_min = clipped.min(axis=0)
+                    x_max, y_max = clipped.max(axis=0)
+                    new[idx] = [x_min, y_min, x_max, y_max]
+                else:
+                    segs_out.append(np.empty((0, 2), dtype=np.float32))
 
         # filter candidates and keep segments in sync
         i = box_candidates(box1=targets[:, 1:5].T * scale, box2=new.T, area_thr=0.1)

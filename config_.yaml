@@ -72,8 +72,8 @@ train:
   label_smoothing: 0.0
 
   ### Augs ###
-  mosaic_augs:
-    mosaic_prob: 0.8
+  mosaic_augs: # not recommended for segmentation
+    mosaic_prob: 0.8 # set to 0 to disable
     no_mosaic_epochs: 5
     mosaic_scale: [0.5, 1.5]
     degrees: 0.0 # not recommended if bbox precision is critical
