@@ -293,6 +293,41 @@ class OV_model:
         preds = self._predict(processed_inputs)
         return self._postprocess(preds, processed_sizes, original_sizes)
 
+    @staticmethod
+    def mask2poly(masks: np.ndarray, img_shape: Tuple[int, int]) -> List[np.ndarray]:
+        """
+        Convert binary masks to normalized polygon coordinates for YOLO segmentation format.
+
+        Args:
+            masks: Binary masks array of shape [N, H, W] where N is number of instances
+            img_shape: Tuple of (height, width) of the original image
+
+        Returns:
+            List of normalized polygon coordinates, each as array of shape [num_points, 2]
+            with values in range [0, 1]. Returns empty array for invalid masks.
+        """
+        h, w = img_shape[:2]
+        polys = []
+
+        for mask in masks:
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                # Get the largest contour
+                contour = max(contours, key=cv2.contourArea)
+                contour = contour.reshape(-1, 2)
+                if len(contour) >= 3:  # Need at least 3 points for a valid polygon
+                    # Normalize coordinates
+                    norm_contour = contour.astype(np.float32)
+                    norm_contour[:, 0] /= w
+                    norm_contour[:, 1] /= h
+                    polys.append(norm_contour)
+                else:
+                    polys.append(np.array([]))
+            else:
+                polys.append(np.array([]))
+
+        return polys
+
 
 def letterbox(
     im,
