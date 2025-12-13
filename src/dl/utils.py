@@ -482,7 +482,9 @@ def label_color(label: int):
     return palette[int(label) % len(palette)]
 
 
-def draw_mask(img: np.ndarray, mask: np.ndarray, color, alpha: float = 0.4, outline: bool = True):
+def draw_mask(
+    img: np.ndarray, mask: np.ndarray, color=(148, 70, 44), alpha: float = 0.4, outline: bool = True
+):
     """
     img: BGR uint8 [H,W,3]
     mask: uint8/bool [H,W] (1=mask)
@@ -506,6 +508,7 @@ def draw_mask(img: np.ndarray, mask: np.ndarray, color, alpha: float = 0.4, outl
     if outline:
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(img, cnts, -1, color, 2)
+    return img
 
 
 def vis_one_box(img, box, label, mode, label_to_name, score=None):
@@ -573,7 +576,9 @@ def visualize(
             and gt_dict["masks"].shape[1] != 0
         ):
             for m in gt_dict["masks"]:
-                draw_mask(img, m.numpy(), color=(46, 153, 60), alpha=mask_alpha_gt, outline=True)
+                img = draw_mask(
+                    img, m.numpy(), color=(46, 153, 60), alpha=mask_alpha_gt, outline=True
+                )
 
         # Draw GT boxes (green)
         for box, label in zip(gt_dict["boxes"], gt_dict["labels"]):
@@ -593,7 +598,7 @@ def visualize(
             pm = pred_masks_to_draw.cpu().numpy()
             for m, lab in zip(pm, pred_dict["labels"]):
                 color = label_color(int(lab))
-                draw_mask(img, m, color=color, alpha=mask_alpha_pred, outline=True)
+                img = draw_mask(img, m, color=color, alpha=mask_alpha_pred, outline=True)
 
         # Draw predicted boxes (blue-ish)
         for box, label, score in zip(pred_dict["boxes"], pred_dict["labels"], pred_dict["scores"]):
@@ -906,6 +911,27 @@ class LetterboxRect(DualTransform):
                 value=self.color,
             )
         return img
+
+    # Mask transform - pad with 0 (not object) instead of image color
+    def apply_to_mask(
+        self, mask, new_w=0, new_h=0, pad_left=0, pad_top=0, pad_right=0, pad_bottom=0, **kwargs
+    ):
+        # resize if needed - use INTER_NEAREST to preserve binary mask values
+        if mask.shape[1] != new_w or mask.shape[0] != new_h:
+            mask = cv2.resize(mask, (int(new_w), int(new_h)), interpolation=cv2.INTER_NEAREST)
+
+        # pad if needed - use 0 for masks (padding is not part of any object)
+        if pad_top or pad_bottom or pad_left or pad_right:
+            mask = cv2.copyMakeBorder(
+                mask,
+                int(pad_top),
+                int(pad_bottom),
+                int(pad_left),
+                int(pad_right),
+                cv2.BORDER_CONSTANT,
+                value=0,
+            )
+        return mask
 
     # Bboxes transform (Pascal VOC: abs xyxy)
     def apply_to_bboxes(

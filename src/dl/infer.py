@@ -3,11 +3,12 @@ from shutil import rmtree
 
 import cv2
 import hydra
+import numpy as np
 from loguru import logger
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from src.dl.utils import abs_xyxy_to_norm_xywh, get_latest_experiment_name, vis_one_box
+from src.dl.utils import abs_xyxy_to_norm_xywh, draw_mask, get_latest_experiment_name, vis_one_box
 from src.infer.torch_model import Torch_model
 
 
@@ -28,10 +29,13 @@ def figure_input_type(folder_path: Path):
     return data_type
 
 
-def visualize(img, boxes, labels, scores, output_path, img_path, label_to_name):
+def visualize(img, boxes, labels, scores, output_path, img_path, label_to_name, masks=None):
     output_path.mkdir(parents=True, exist_ok=True)
     for box, label, score in zip(boxes, labels, scores):
         vis_one_box(img, box, label, mode="pred", label_to_name=label_to_name, score=score)
+    if masks is not None:
+        for i in range(masks.shape[0]):
+            img = draw_mask(img, masks[i])
     if len(boxes):
         cv2.imwrite((str(f"{output_path / Path(img_path).stem}.jpg")), img)
 
@@ -41,12 +45,26 @@ def save_yolo_annotations(res, output_path, img_path, img_shape):
 
     if len(res["boxes"]) == 0:
         return
+
+    has_polys = "polys" in res and res["polys"] is not None and len(res["polys"]) > 0
+
     with open(output_path / f"{Path(img_path).stem}.txt", "a") as f:
-        for class_id, box in zip(res["labels"], res["boxes"]):
-            norm_box = abs_xyxy_to_norm_xywh(box[None], img_shape[0], img_shape[1])[0]
-            f.write(
-                f"{int(class_id)} {norm_box[0]:.6f} {norm_box[1]:.6f} {norm_box[2]:.6f} {norm_box[3]:.6f}\n"
-            )
+        for idx, (class_id, box) in enumerate(zip(res["labels"], res["boxes"])):
+            if has_polys:
+                # YOLO segmentation format: class_id x1 y1 x2 y2 x3 y3 ...
+                poly = res["polys"][idx]
+                if len(poly) >= 3:  # Need at least 3 points for a valid polygon
+                    norm_coords = []
+                    for point in poly:
+                        norm_coords.append(f"{point[0]:.6f}")
+                        norm_coords.append(f"{point[1]:.6f}")
+                    f.write(f"{int(class_id)} {' '.join(norm_coords)}\n")
+            else:
+                # YOLO detection format: class_id x_center y_center width height
+                norm_box = abs_xyxy_to_norm_xywh(box[None], img_shape[0], img_shape[1])[0]
+                f.write(
+                    f"{int(class_id)} {norm_box[0]:.6f} {norm_box[1]:.6f} {norm_box[2]:.6f} {norm_box[3]:.6f}\n"
+                )
 
 
 def crops(or_img, res, paddings, output_path, output_stem):
@@ -66,20 +84,27 @@ def crops(or_img, res, paddings, output_path, output_stem):
         cv2.imwrite((str(output_path / "crops" / f"{output_stem}_{crop_id}.jpg")), crop)
 
 
-def run_images(torch_model, folder_path, output_path, label_to_name, to_crop, paddings):
+def run_images(
+    torch_model, folder_path, output_path, label_to_name, to_crop, paddings, conf_thresh
+):
     batch = 0
     imag_paths = [img.name for img in folder_path.iterdir() if not str(img).startswith(".")]
     labels = set()
     for img_path in tqdm(imag_paths):
         img = cv2.imread(str(folder_path / img_path))
         or_img = img.copy()
-        res = torch_model(img)
+        raw_res = torch_model(img)
 
+        if "mask_probs" in raw_res[0]:
+            raw_res[0]["masks"] = (raw_res[batch]["mask_probs"] >= conf_thresh).astype(np.uint8)
         res = {
-            "boxes": res[batch]["boxes"],
-            "labels": res[batch]["labels"],
-            "scores": res[batch]["scores"],
+            "boxes": raw_res[batch]["boxes"],
+            "labels": raw_res[batch]["labels"],
+            "scores": raw_res[batch]["scores"],
         }
+        if "masks" in raw_res[0]:
+            res["masks"] = raw_res[batch]["masks"]
+            res["polys"] = torch_model.mask2poly(res["masks"], img.shape)
 
         visualize(
             img=img,
@@ -89,6 +114,7 @@ def run_images(torch_model, folder_path, output_path, label_to_name, to_crop, pa
             output_path=output_path / "images",
             img_path=img_path,
             label_to_name=label_to_name,
+            masks=res.get("masks", None),
         )
 
         for class_id in res["labels"]:
@@ -106,7 +132,9 @@ def run_images(torch_model, folder_path, output_path, label_to_name, to_crop, pa
             f.write(f"{label_to_name[int(class_id)]}\n")
 
 
-def run_videos(torch_model, folder_path, output_path, label_to_name, to_crop, paddings):
+def run_videos(
+    torch_model, folder_path, output_path, label_to_name, to_crop, paddings, conf_thresh
+):
     batch = 0
     vid_paths = [vid.name for vid in folder_path.iterdir() if not str(vid.name).startswith(".")]
     labels = set()
@@ -116,13 +144,18 @@ def run_videos(torch_model, folder_path, output_path, label_to_name, to_crop, pa
         idx = 0
         while success:
             idx += 1
-            res = torch_model(img)
+            raw_res = torch_model(img)
 
+            if "mask_probs" in raw_res[0]:
+                raw_res[0]["masks"] = (raw_res[batch]["mask_probs"] >= conf_thresh).astype(np.uint8)
             res = {
-                "boxes": res[batch]["boxes"],
-                "labels": res[batch]["labels"],
-                "scores": res[batch]["scores"],
+                "boxes": raw_res[batch]["boxes"],
+                "labels": raw_res[batch]["labels"],
+                "scores": raw_res[batch]["scores"],
             }
+            if "masks" in raw_res[0]:
+                res["masks"] = raw_res[batch]["masks"]
+                res["polys"] = torch_model.mask2poly(res["masks"], img.shape)
 
             frame_name = f"{Path(vid_path).stem}_frame_{idx}"
             visualize(
@@ -133,6 +166,7 @@ def run_videos(torch_model, folder_path, output_path, label_to_name, to_crop, pa
                 output_path=output_path / "images",
                 img_path=frame_name,
                 label_to_name=label_to_name,
+                masks=res.get("masks", None),
             )
 
             for class_id in res["labels"]:
@@ -171,6 +205,7 @@ def main(cfg: DictConfig):
         conf_thresh=cfg.train.conf_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
+        enable_mask_head=cfg.task == "segment",
     )
 
     folder_path = Path(str(cfg.train.path_to_test_data))
@@ -188,6 +223,7 @@ def main(cfg: DictConfig):
             label_to_name=cfg.train.label_to_name,
             to_crop=to_crop,
             paddings=paddings,
+            conf_thresh=cfg.train.conf_thresh,
         )
     elif data_type == "video":
         run_videos(
@@ -197,6 +233,7 @@ def main(cfg: DictConfig):
             label_to_name=cfg.train.label_to_name,
             to_crop=to_crop,
             paddings=paddings,
+            conf_thresh=cfg.train.conf_thresh,
         )
 
 
