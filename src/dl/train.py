@@ -34,6 +34,7 @@ from src.dl.dataset import Loader
 from src.dl.utils import (
     calculate_remaining_time,
     cleanup_masks,
+    encode_sample_masks_to_rle,
     get_latest_experiment_name,
     get_vram_usage,
     log_metrics_locally,
@@ -307,7 +308,7 @@ class Trainer:
                 # binarize masks
                 out["masks"] = (
                     (masks_list[0].clamp(0, 1) >= conf_thresh).to(torch.uint8).detach().cpu()
-                )  # [B, H, W]
+                )  # [N, H, W]
 
                 # clean up masks outside of the corresponding bbox
                 out["masks"] = cleanup_masks(out["masks"], out["boxes"])
@@ -365,7 +366,6 @@ class Trainer:
     ) -> Tuple[List[Dict[str, torch.Tensor]], List[Dict[str, torch.Tensor]]]:
         """
         Outputs gt and preds. Each is a List of dicts. 1 dict = 1 image.
-
         """
         all_gt, all_preds = [], []
         model = self.model
@@ -400,6 +400,10 @@ class Trainer:
 
                 # collect all preds and gt for metrics
                 for gt_instance, pred_instance in zip(gt, preds):
+                    # Encode masks to RLE to save memory during validation
+                    encode_sample_masks_to_rle(gt_instance)
+                    encode_sample_masks_to_rle(pred_instance)
+
                     all_preds.append(pred_instance)
                     all_gt.append(gt_instance)
 

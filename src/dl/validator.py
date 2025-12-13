@@ -1,7 +1,8 @@
 import copy
+import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,7 +11,10 @@ from loguru import logger
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision.ops import box_iou
 
-from src.dl.utils import filter_preds
+from src.dl.utils import filter_preds, rle_to_masks
+
+# Suppress verbose output from faster_coco_eval
+logging.getLogger("faster_coco_eval").setLevel(logging.WARNING)
 
 
 class Validator:
@@ -36,15 +40,16 @@ class Validator:
         self.label_to_name = label_to_name
         self.conf_matrix = None
 
+        # Use faster_coco_eval backend for numpy 2.x compatibility
         self.torch_metric = MeanAveragePrecision(
-            box_format="xyxy", iou_type="bbox", sync_on_compute=False
+            box_format="xyxy", iou_type="bbox", sync_on_compute=False, backend="faster_coco_eval"
         )
         self.torch_metric.warn_on_many_detections = False
 
         # get raw preds for torchmetrics
         self.torchmetrics_preds = copy.deepcopy(preds)
 
-        if "all_boxes" in self.torchmetrics_preds[0]:
+        if len(self.torchmetrics_preds) > 0 and "all_boxes" in self.torchmetrics_preds[0]:
             for torchmetrics_pred in self.torchmetrics_preds:
                 for key in ["boxes", "labels", "scores"]:
                     torchmetrics_pred[key] = torchmetrics_pred[f"all_{key}"]
@@ -52,13 +57,26 @@ class Validator:
 
         self.torch_metric.update(self.torchmetrics_preds, gt)
 
-        # when masks available - instance-weighted IoU will be calculated
-        self.use_masks = any(("masks" in p) for p in preds) and any(("masks" in g) for g in gt)
+        # Check if masks available (either dense or RLE-encoded)
+        def _has_masks(sample):
+            if "masks" in sample and sample["masks"] is not None:
+                if hasattr(sample["masks"], "numel"):
+                    return sample["masks"].numel() > 0
+                return True
+            if "masks_rle" in sample and sample["masks_rle"]:
+                return True
+            return False
+
+        self.use_masks = any(_has_masks(p) for p in preds) and any(_has_masks(g) for g in gt)
         if self.use_masks:
-            self.torch_metric_mask = MeanAveragePrecision(box_format="xyxy", iou_type="segm")
+            self.torch_metric_mask = MeanAveragePrecision(
+                box_format="xyxy", iou_type="segm", backend="faster_coco_eval"
+            )
             self.torch_metric_mask.warn_on_many_detections = False
-            preds_for_segm = self._ensure_binary_pred_masks(copy.deepcopy(preds))
-            self.torch_metric_mask.update(preds_for_segm, gt)
+            # Decode RLE masks for torchmetrics (it needs dense masks)
+            preds_for_segm = self._prepare_masks_for_torchmetrics(copy.deepcopy(preds))
+            gt_for_segm = self._prepare_masks_for_torchmetrics(copy.deepcopy(gt))
+            self.torch_metric_mask.update(preds_for_segm, gt_for_segm)
 
     def compute_metrics(self, extended=False, ignore_masks=False) -> Dict[str, float]:
         self.torch_metrics = self.torch_metric.compute()
@@ -75,6 +93,51 @@ class Validator:
             metrics.pop("extended_metrics", None)
         return metrics
 
+    @staticmethod
+    def _decode_masks_if_rle(sample: Dict, device: str = "cpu") -> torch.Tensor:
+        """
+        Get masks from sample, decoding RLE if necessary.
+        Returns [N, H, W] uint8 tensor.
+        """
+        # If already has dense masks, return them
+        if "masks" in sample and sample["masks"] is not None and sample["masks"].numel() > 0:
+            m = sample["masks"]
+            if m.dim() == 4 and m.shape[1] == 1:
+                m = m[:, 0]
+            return m.to(torch.uint8)
+
+        # If has RLE-encoded masks, decode them
+        if "masks_rle" in sample and sample["masks_rle"]:
+            return rle_to_masks(sample["masks_rle"], device=device)
+
+        # No masks available
+        return torch.zeros((0, 1, 1), dtype=torch.uint8)
+
+    def _prepare_masks_for_torchmetrics(self, samples: List[Dict]) -> List[Dict]:
+        """
+        Prepare samples for torchmetrics by ensuring dense binary masks.
+        Decodes RLE if present, ensures uint8 format.
+        """
+        for s in samples:
+            # Decode RLE if present
+            if "masks_rle" in s and s["masks_rle"]:
+                s["masks"] = self._decode_masks_if_rle(s)
+                # Clean up RLE keys
+                if "masks_rle" in s:
+                    del s["masks_rle"]
+                if "masks_size" in s:
+                    del s["masks_size"]
+
+            # Ensure binary uint8 masks
+            if "masks" in s and s["masks"] is not None:
+                s["masks"] = self._binarize_masks(s["masks"])
+            elif "mask_probs" in s and s["mask_probs"] is not None:
+                s["masks"] = self._binarize_masks(s["mask_probs"])
+            else:
+                s["masks"] = torch.zeros((0, 1, 1), dtype=torch.uint8)
+
+        return samples
+
     def _binarize_masks(self, m: torch.Tensor) -> torch.Tensor:
         """Ensure binary uint8 masks using self.conf_thresh if needed."""
         if m is None or m.numel() == 0:
@@ -84,7 +147,10 @@ class Validator:
         return (m > float(self.conf_thresh)).to(torch.uint8)
 
     def _get_pred_masks_bin(self, pred: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Return [Np,H,W] uint8; prefer 'masks' else binarize 'mask_probs'."""
+        """Return [Np,H,W] uint8; prefer 'masks'/'masks_rle' else binarize 'mask_probs'."""
+        # First try RLE-encoded masks
+        if "masks_rle" in pred and pred["masks_rle"]:
+            return self._decode_masks_if_rle(pred)
         if "masks" in pred and pred["masks"] is not None:
             return self._binarize_masks(pred["masks"])
         if "mask_probs" in pred and pred["mask_probs"] is not None:
@@ -126,16 +192,22 @@ class Validator:
 
     def _get_gt_masks_bin(self, gt: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Return [Ng,H,W] uint8 for GT. If no masks -> empty.
+        Return [Ng,H,W] uint8 for GT. Handles both dense and RLE-encoded masks.
         """
+        # Try RLE first
+        if "masks_rle" in gt and gt["masks_rle"]:
+            return self._decode_masks_if_rle(gt)
         if "masks" not in gt or gt["masks"] is None or gt["masks"].numel() == 0:
             return torch.zeros((0, 1, 1), dtype=torch.uint8)
         return self._to_nhw_uint8(gt["masks"])
 
     def _get_pred_masks_bin_nhw(self, pred: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Return [Np,H,W] uint8 for preds using 'masks' or 'mask_probs'.
+        Return [Np,H,W] uint8 for preds using 'masks', 'masks_rle', or 'mask_probs'.
         """
+        # Try RLE first
+        if "masks_rle" in pred and pred["masks_rle"]:
+            return self._decode_masks_if_rle(pred)
         if "masks" in pred and pred["masks"] is not None and pred["masks"].numel() > 0:
             return self._to_nhw_uint8(pred["masks"])
         if (
@@ -565,7 +637,17 @@ def assert_close(name, got, exp, tol=1e-6):
 
 
 def run_single_case(gt_list, pred_list, iou_thr=0.5, msg=""):
-    val = Validator(gt_list, pred_list, conf_thresh=0.5, iou_thresh=iou_thr)
+    # Collect all unique labels from gt and preds
+    all_labels = set()
+    for g in gt_list:
+        all_labels.update(g["labels"].tolist())
+    for p in pred_list:
+        all_labels.update(p["labels"].tolist())
+    label_to_name = {lbl: f"class_{lbl}" for lbl in all_labels}
+
+    val = Validator(
+        gt_list, pred_list, label_to_name=label_to_name, conf_thresh=0.5, iou_thresh=iou_thr
+    )
     m = val.compute_metrics(extended=False)
     print(f"\nCase: {msg}\nMetrics: {m}")
     return m
@@ -698,6 +780,50 @@ def main():
     assert_close("precision", m6["precision"], 0.5)
 
     print("\nAll synthetic instance-segmentation tests PASSED ✅")
+
+    # -------- RLE Encoding Tests --------
+    print("\n" + "=" * 50)
+    print("Testing RLE Encoding/Decoding...")
+    print("=" * 50)
+
+    from src.dl.utils import encode_sample_masks_to_rle, masks_to_rle, rle_to_masks
+
+    # Test 1: RLE encode/decode roundtrip
+    test_masks = torch.stack([gt1_mask, gt2_mask], dim=0)  # [2, H, W]
+    rles = masks_to_rle(test_masks)
+    decoded = rle_to_masks(rles)
+    assert torch.equal(test_masks, decoded), "RLE roundtrip failed!"
+    print("✓ RLE encode/decode roundtrip works")
+
+    # Test 2: Memory savings estimation
+    from src.dl.utils import get_dense_mask_memory_size, get_rle_memory_size
+
+    dense_size = get_dense_mask_memory_size(2, test_masks.shape[1], test_masks.shape[2])
+    rle_size = get_rle_memory_size(rles)
+    print(
+        f"✓ Memory: dense={dense_size} bytes, RLE={rle_size} bytes, savings={100 * (1 - rle_size / dense_size):.1f}%"
+    )
+
+    # Test 3: Validator with RLE-encoded masks
+    gt_rle = [pack_sample([gt1_mask], labels=[0])]
+    pred_rle = [pack_sample([gt1_mask.clone()], labels=[0], scores=[1.0])]
+
+    # Encode to RLE
+    encode_sample_masks_to_rle(gt_rle[0])
+    encode_sample_masks_to_rle(pred_rle[0])
+
+    # Verify masks were replaced with RLE
+    assert "masks_rle" in gt_rle[0] and "masks" not in gt_rle[0], "GT should have masks_rle"
+    assert "masks_rle" in pred_rle[0] and "masks" not in pred_rle[0], "Pred should have masks_rle"
+
+    # Run validator with RLE samples
+    m_rle = run_single_case(gt_rle, pred_rle, iou_thr=0.5, msg="RLE-encoded perfect match")
+    assert_close("precision", m_rle["precision"], 1.0)
+    assert_close("recall", m_rle["recall"], 1.0)
+    assert_close("iou", m_rle["iou"], 1.0)
+    print("✓ Validator works with RLE-encoded masks")
+
+    print("\nAll RLE tests PASSED ✅")
 
 
 if __name__ == "__main__":

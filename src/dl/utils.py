@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 import random
@@ -13,8 +14,11 @@ import pandas as pd
 import torch
 import wandb
 from albumentations.core.transforms_interface import DualTransform
+from faster_coco_eval.core import mask as mask_utils
 from loguru import logger
 from tabulate import tabulate
+
+logging.getLogger("faster_coco_eval").setLevel(logging.WARNING)
 
 
 def set_seeds(seed: int, cudnn_fixed: bool = False) -> None:
@@ -77,9 +81,11 @@ def log_metrics_locally(
             metrics_df["extended_metrics"].tolist(), index=metrics_df.index
         ).round(4)
 
-    metrics_df = metrics_df[
-        ["mAP_50", "f1", "precision", "recall", "iou", "mAP_50_95", "TPs", "FPs", "FNs"]
-    ]
+    metrics_list = ["mAP_50", "f1", "precision", "recall", "iou", "mAP_50_95", "TPs", "FPs", "FNs"]
+    if "mAP_50_mask" in metrics_df.columns:
+        metrics_list.insert(1, "mAP_50_mask")
+        metrics_list.remove("mAP_50_95")
+    metrics_df = metrics_df[metrics_list]
 
     tabulated_data = tabulate(metrics_df, headers="keys", tablefmt="pretty", showindex=True)
     if epoch:
@@ -497,7 +503,7 @@ def draw_mask(
         mask = mask.squeeze(0)
 
     if mask.max() == 0:
-        return
+        return img
 
     # fast alpha blend on masked pixels
     m = mask.astype(bool)
@@ -1006,3 +1012,154 @@ def poly_abs_to_mask(poly_abs: np.ndarray, h: int, w: int) -> np.ndarray:
     m = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(m, [pts], 1)
     return m
+
+
+# ============================================================================
+# RLE Encoding/Decoding for memory-efficient mask storage
+# ============================================================================
+
+
+def masks_to_rle(masks: torch.Tensor) -> List[Dict]:
+    """
+    Encode binary masks to COCO RLE format for memory-efficient storage.
+
+    Args:
+        masks: [N, H, W] uint8 tensor with binary masks (0/1)
+
+    Returns:
+        List of RLE dicts, each with 'size' and 'counts' keys
+    """
+    if masks is None or masks.numel() == 0:
+        return []
+
+    # Ensure proper format: [N, H, W], uint8, on CPU
+    if masks.dim() == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    masks = masks.to(torch.uint8).cpu().numpy()
+
+    rles = []
+    for m in masks:
+        # pycocotools expects Fortran-order (column-major) array
+        rle = mask_utils.encode(np.asfortranarray(m))
+        # Convert bytes to string for JSON serialization compatibility
+        rle["counts"] = (
+            rle["counts"].decode("utf-8") if isinstance(rle["counts"], bytes) else rle["counts"]
+        )
+        rles.append(rle)
+
+    return rles
+
+
+def rle_to_masks(rles: List[Dict], device: str = "cpu") -> torch.Tensor:
+    """
+    Decode RLE-encoded masks back to dense tensor format.
+
+    Args:
+        rles: List of RLE dicts from masks_to_rle()
+        device: Target device for output tensor
+
+    Returns:
+        [N, H, W] uint8 tensor with binary masks
+    """
+    if not rles:
+        return torch.zeros((0, 1, 1), dtype=torch.uint8)
+
+    # Ensure counts are bytes for pycocotools
+    rles_bytes = []
+    for rle in rles:
+        rle_copy = rle.copy()
+        if isinstance(rle_copy["counts"], str):
+            rle_copy["counts"] = rle_copy["counts"].encode("utf-8")
+        rles_bytes.append(rle_copy)
+
+    # Decode all masks at once (more efficient)
+    masks_np = mask_utils.decode(rles_bytes)  # [H, W, N]
+    if masks_np.ndim == 2:
+        # Single mask case: [H, W] -> [1, H, W]
+        masks_np = masks_np[np.newaxis, ...]
+    else:
+        masks_np = np.transpose(masks_np, (2, 0, 1))  # [N, H, W]
+
+    return torch.from_numpy(masks_np.copy()).to(dtype=torch.uint8, device=device)
+
+
+def encode_sample_masks_to_rle(sample: Dict) -> Dict:
+    """
+    Convert a prediction/GT sample dict to use RLE-encoded masks.
+    Replaces 'masks' tensor with 'masks_rle' list and stores original size.
+
+    Args:
+        sample: Dict with 'masks' key containing [N, H, W] tensor
+
+    Returns:
+        Same dict with 'masks' replaced by 'masks_rle' and 'masks_size'
+    """
+    if "masks" not in sample or sample["masks"] is None:
+        return sample
+
+    masks = sample["masks"]
+    if masks.numel() == 0:
+        sample["masks_rle"] = []
+        sample["masks_size"] = (0, 0)
+        del sample["masks"]
+        return sample
+
+    # Store size for later decoding
+    if masks.dim() == 3:
+        _, H, W = masks.shape
+    else:
+        H, W = masks.shape[-2], masks.shape[-1]
+
+    sample["masks_rle"] = masks_to_rle(masks)
+    sample["masks_size"] = (H, W)
+    del sample["masks"]
+
+    return sample
+
+
+def decode_sample_rle_to_masks(sample: Dict, device: str = "cpu") -> Dict:
+    """
+    Decode RLE masks back to dense tensor format in a sample dict.
+
+    Args:
+        sample: Dict with 'masks_rle' key
+        device: Target device for output tensor
+
+    Returns:
+        Same dict with 'masks' restored from 'masks_rle'
+    """
+    if "masks_rle" not in sample:
+        return sample
+
+    rles = sample["masks_rle"]
+    if not rles:
+        size = sample.get("masks_size", (1, 1))
+        sample["masks"] = torch.zeros((0, size[0], size[1]), dtype=torch.uint8)
+    else:
+        sample["masks"] = rle_to_masks(rles, device=device)
+
+    return sample
+
+
+def get_rle_memory_size(rles: List[Dict]) -> int:
+    """
+    Estimate memory usage of RLE-encoded masks in bytes.
+    Useful for debugging/monitoring memory savings.
+    """
+    if not rles:
+        return 0
+
+    total = 0
+    for rle in rles:
+        # Size list + counts string
+        total += 16  # overhead for dict
+        total += len(str(rle.get("counts", "")))
+        total += 16  # size tuple overhead
+    return total
+
+
+def get_dense_mask_memory_size(n_masks: int, h: int, w: int) -> int:
+    """
+    Calculate memory usage of dense masks in bytes.
+    """
+    return n_masks * h * w  # uint8 = 1 byte per pixel
