@@ -13,7 +13,7 @@ train:
   pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
   data_path: ${train.root}/data/dataset # path to dataset
-  path_to_test_data: ${train.root}/VisDrone2019-DET-test-dev/images  # path to test set, used in infer script
+  path_to_test_data: ${train.root}/data/test  # path to test set, used in infer script
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
   debug_img_path: ${train.root}/output/debug_images
