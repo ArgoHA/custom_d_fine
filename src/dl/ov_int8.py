@@ -94,6 +94,7 @@ def main(cfg: DictConfig):
                 orig_sizes,
                 num_labels=num_labels,
                 keep_ratio=keep_ratio,
+                conf_thresh=cfg.train.conf_thresh,
             )
             gt = Trainer.gt_postprocess(
                 inputs,

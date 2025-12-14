@@ -542,6 +542,11 @@ def non_max_suppression(boxes, scores, classes, masks=None, iou_threshold=0.5):
     - filtered_classes (torch.Tensor): Tensor containing class indices of the filtered boxes.
     - filtered_masks (torch.Tensor or None): Tensor containing masks of the filtered boxes, or None if masks was None.
     """
+    boxes = torch.from_numpy(boxes) if not isinstance(boxes, torch.Tensor) else boxes
+    scores = torch.from_numpy(scores) if not isinstance(scores, torch.Tensor) else scores
+    classes = torch.from_numpy(classes) if not isinstance(classes, torch.Tensor) else classes
+    if masks is not None:
+        masks = torch.from_numpy(masks) if not isinstance(masks, torch.Tensor) else masks
     # Prepare lists to collect the filtered boxes, scores, and classes
     filtered_boxes = []
     filtered_scores = []
