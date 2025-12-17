@@ -9,7 +9,7 @@ from omegaconf import DictConfig
 from torchvision.ops import box_iou
 from tqdm import tqdm
 
-from src.dl.dataset import Loader
+from src.dl.dataset import Loader, parse_yolo_label_file
 from src.dl.utils import (
     abs_xyxy_to_norm_xywh,
     get_latest_experiment_name,
@@ -202,9 +202,7 @@ def run(model, train_loader, val_loader, cfg: DictConfig) -> None:
             label_path = Path(cfg.train.data_path) / "labels" / paths[0].with_suffix(".txt")
             targets = [{"boxes": [], "labels": []}]
             if label_path.exists() and label_path.stat().st_size > 1:
-                targets_raw = np.loadtxt(label_path)
-                if len(targets_raw.shape) == 1:
-                    targets_raw = targets_raw[None, :]
+                targets_raw, _ = parse_yolo_label_file(label_path)
                 targets = [
                     {
                         "boxes": np.array(targets_raw[:, 1:5], dtype=np.float32),
