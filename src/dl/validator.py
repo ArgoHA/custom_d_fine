@@ -1,4 +1,5 @@
 import copy
+import gc
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -25,12 +26,16 @@ class Validator:
         label_to_name: Dict[int, str],
         conf_thresh=0.5,
         iou_thresh=0.5,
+        mask_batch_size=1000,
     ) -> None:
         """
         Format example:
         gt = [{'labels': tensor([0]), 'boxes': tensor([[561.0, 297.0, 661.0, 359.0]])}, ...]
         len(gt) is the number of images
         bboxes are in format [x1, y1, x2, y2], absolute values
+
+        mask_batch_size - Number of images to process at once when computing mask metrics.
+            Lower values use less RAM but may be slower. Default 500.
         """
         self.gt = gt
         self.preds = preds
@@ -39,6 +44,7 @@ class Validator:
         self.thresholds = np.arange(0.2, 1.0, 0.05)
         self.label_to_name = label_to_name
         self.conf_matrix = None
+        self.mask_batch_size = mask_batch_size
 
         # Use faster_coco_eval backend for numpy 2.x compatibility
         self.torch_metric = MeanAveragePrecision(
@@ -73,12 +79,28 @@ class Validator:
                 box_format="xyxy", iou_type="segm", backend="faster_coco_eval"
             )
             self.torch_metric_mask.warn_on_many_detections = False
-            # Decode RLE masks for torchmetrics (it needs dense masks)
-            preds_for_segm = self._prepare_masks_for_torchmetrics(copy.deepcopy(preds))
-            gt_for_segm = self._prepare_masks_for_torchmetrics(copy.deepcopy(gt))
-            self.torch_metric_mask.update(preds_for_segm, gt_for_segm)
+            # Decode RLE masks for torchmetrics in batches to avoid OOM
+            # torchmetrics supports incremental .update() calls
+            batch_size = self.mask_batch_size
+            n_samples = len(preds)
+            for batch_start in range(0, n_samples, batch_size):
+                batch_end = min(batch_start + batch_size, n_samples)
 
-    def compute_metrics(self, extended=False, ignore_masks=False) -> Dict[str, float]:
+                # Deep copy only this batch
+                preds_batch = [copy.deepcopy(preds[i]) for i in range(batch_start, batch_end)]
+                gt_batch = [copy.deepcopy(gt[i]) for i in range(batch_start, batch_end)]
+
+                # Decode RLE to dense for this batch only
+                preds_batch = self._prepare_masks_for_torchmetrics(preds_batch)
+                gt_batch = self._prepare_masks_for_torchmetrics(gt_batch)
+
+                # Update metrics incrementally
+                self.torch_metric_mask.update(preds_batch, gt_batch)
+
+                # Explicitly free memory
+                del preds_batch, gt_batch
+
+    def compute_metrics(self, extended=False, ignore_masks=False, cleanup=True) -> Dict[str, float]:
         self.torch_metrics = self.torch_metric.compute()
 
         metrics = self._compute_main_metrics(self.preds, ignore_masks=ignore_masks)
@@ -88,10 +110,36 @@ class Validator:
             tm_mask = self.torch_metric_mask.compute()
             metrics["mAP_50_mask"] = tm_mask["map_50"].item()
             metrics["mAP_50_95_mask"] = tm_mask["map"].item()
+            del tm_mask
 
         if not extended:
             metrics.pop("extended_metrics", None)
+        # Clean up large data structures to free RAM
+        if cleanup:
+            self._cleanup_torchmetrics()
         return metrics
+
+    def _cleanup_torchmetrics(self):
+        """Reset torchmetrics internal state to free memory."""
+
+        # Reset torchmetrics - this clears their internal detection/groundtruth lists
+        if hasattr(self, "torch_metric"):
+            self.torch_metric.reset()
+        if hasattr(self, "torch_metric_mask"):
+            self.torch_metric_mask.reset()
+
+        # Clear the deep copy of predictions used for torchmetrics
+        if hasattr(self, "torchmetrics_preds"):
+            del self.torchmetrics_preds
+            self.torchmetrics_preds = None
+
+        # Clear stored torch_metrics results
+        if hasattr(self, "torch_metrics"):
+            del self.torch_metrics
+            self.torch_metrics = None
+
+        # Force garbage collection
+        gc.collect()
 
     @staticmethod
     def _decode_masks_if_rle(sample: Dict, device: str = "cpu") -> torch.Tensor:
@@ -544,6 +592,8 @@ class Validator:
         for threshold in thresholds:
             torchmetrics_preds = copy.deepcopy(self.torchmetrics_preds)
             # remove masks as they are already filtered and we wll get a shape mismatch
+            if not torchmetrics_preds:
+                return
             for torchmetrics_pred in torchmetrics_preds:
                 if "masks" in torchmetrics_pred:
                     del torchmetrics_pred["masks"]
