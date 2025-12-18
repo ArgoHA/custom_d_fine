@@ -67,6 +67,7 @@ class ONNX_model:
         keep_ratio: bool,
     ) -> NDArray:
         """Convert normalised xywh→absolute xyxy & rescale to original img size."""
+        boxes = boxes.numpy()
         B, Q, _ = boxes.shape
         out = np.empty_like(boxes)
         for b in range(B):

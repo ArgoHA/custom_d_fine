@@ -71,6 +71,7 @@ class OV_model:
 
     @staticmethod
     def process_boxes(boxes, processed_sizes, orig_sizes, keep_ratio, device):
+        boxes = boxes.numpy()
         final_boxes = np.zeros_like(boxes)
         for idx, box in enumerate(boxes):
             final_boxes[idx] = norm_xywh_to_abs_xyxy(
@@ -459,3 +460,26 @@ def cleanup_masks(masks, boxes):
     )  # (N, H, W), bool
     masks = masks * inside.astype(masks.dtype)
     return masks
+
+
+if __name__ == "__main__":
+    import time
+
+    model = OV_model(
+        model_path="/home/argo/Desktop/Projects/Veryfi/crops/output/models/teee_2025-12-17/model.xml",
+        n_outputs=1,
+        input_height=640,
+        input_width=640,
+        conf_thresh=0.4,
+    )
+
+    img = cv2.imread("/home/argo/Desktop/Projects/Veryfi/sign_det/data/test/test_image.jpg")
+
+    latency = []
+    for _ in range(30):
+        t0 = time.perf_counter()
+        res = model(img)
+        latency.append((time.perf_counter() - t0) * 1000)
+
+    print(res)
+    print("LATENCY:", np.mean(latency[1:]))
