@@ -605,8 +605,11 @@ class Loader:
                 f"Images in train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}"
             )
             obj_stats = self._get_label_stats()
+            sorted_obj_stats = dict(
+                sorted(obj_stats.items(), key=lambda item: item[1], reverse=True)
+            )
             logger.info(
-                f"Objects count: {', '.join(f'{key}: {value}' for key, value in obj_stats.items())}"
+                f"Objects count: {', '.join(f'{key}: {value}' for key, value in sorted_obj_stats.items())}"
             )
             logger.info(f"Background images: {self._get_amount_of_background()}")
         return train_loader, val_loader, test_loader

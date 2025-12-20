@@ -127,7 +127,7 @@ class Trainer:
             log_file.unlink(missing_ok=True)
             logger.add(log_file, format="{message}", level="INFO", rotation="10 MB")
 
-        logger.info(f"Training task: {self.task}")
+        logger.info(f"Experiment: {cfg.exp}, Task: {self.task}")
         seed = cfg.train.seed + self.rank if self.distributed else cfg.train.seed
         set_seeds(seed, cfg.train.cudnn_fixed)
 
@@ -444,7 +444,7 @@ class Trainer:
                 conf_thresh=conf_thresh,
                 iou_thresh=iou_thresh,
                 label_to_name=self.label_to_name,
-                mask_batch_size=self.mask_batch_size
+                mask_batch_size=self.mask_batch_size,
             )
             metrics = validator.compute_metrics(extended=extended)
             if path_to_save:  # val and test
