@@ -38,7 +38,13 @@ base_cfg = {
         "reg_max": 32,
     },
     "matcher": {
-        "weight_dict": {"cost_class": 2, "cost_bbox": 5, "cost_giou": 2},
+        "weight_dict": {
+            "cost_class": 2,
+            "cost_bbox": 5,
+            "cost_giou": 2,
+            "cost_mask": 5,  # focal mask cost for segmentation matching
+            "cost_mask_dice": 5,  # dice mask cost for segmentation matching
+        },
         "alpha": 0.25,
         "gamma": 2.0,
         "use_focal_loss": True,

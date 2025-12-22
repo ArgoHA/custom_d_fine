@@ -942,7 +942,7 @@ class DFINETransformer(nn.Module):
     def forward(self, all_feats, targets=None):
         feats = all_feats[0]
         inner_feats = all_feats[1]
-        do_masks = self._should_do_masks(targets)
+        enable_mask_head = self._should_do_masks(targets)
         # input projection and embedding
         memory, spatial_shapes = self._get_encoder_input(feats)
         # prepare denoising training
@@ -979,7 +979,7 @@ class DFINETransformer(nn.Module):
             self.up,
             self.reg_scale,
             attn_mask=attn_mask,
-            return_queries=do_masks,
+            return_queries=enable_mask_head,
         )  # hs: [num_layers, B, Q, C]
 
         if self.training and dn_meta is not None:
@@ -991,10 +991,16 @@ class DFINETransformer(nn.Module):
             dn_out_corners, out_corners = torch.split(out_corners, dn_meta["dn_num_split"], dim=2)
             dn_out_refs, out_refs = torch.split(out_refs, dn_meta["dn_num_split"], dim=2)
 
+            # split hs for denoising mask computation
+            if enable_mask_head and hs is not None:
+                dn_hs, hs = torch.split(hs, dn_meta["dn_num_split"], dim=2)
+
         # segmentation
-        if do_masks:
+        if enable_mask_head:
             pred_masks = None
             aux_masks = None
+            dn_pred_masks = None
+            dn_aux_masks = None
             B = inner_feats[0].shape[0]
             C = self.hidden_dim
             lvl0_h, lvl0_w = spatial_shapes[0]
@@ -1003,10 +1009,17 @@ class DFINETransformer(nn.Module):
             mem0 = memory[:, :lvl0_len, :]  # (B, H8*W8, C)
             mem0 = mem0.permute(0, 2, 1).reshape(B, C, lvl0_h, lvl0_w)  # (B,C,H8,W8)
             mask_feat = self.pixel_decoder(inner_feats, enc_feat_1_8=mem0)
+
+            # Compute masks for regular queries
             pred_masks = self._mask_logits_from_h(hs[-1], mask_feat)  # logits
             aux_masks = [
                 self._mask_logits_from_h(h, mask_feat) for h in hs[:-1]
             ]  # list of [B,Q,Hm,Wm]
+
+            # Compute masks for denoising queries
+            if self.training and dn_meta is not None and dn_hs is not None:
+                dn_pred_masks = self._mask_logits_from_h(dn_hs[-1], mask_feat)
+                dn_aux_masks = [self._mask_logits_from_h(h, mask_feat) for h in dn_hs[:-1]]
 
         if self.training:
             out = {
@@ -1017,14 +1030,14 @@ class DFINETransformer(nn.Module):
                 "up": self.up,
                 "reg_scale": self.reg_scale,
             }
-            if do_masks:
+            if enable_mask_head:
                 out["pred_masks"] = pred_masks
         else:
             out = {
                 "pred_logits": out_logits[-1],
                 "pred_boxes": out_bboxes[-1],
             }
-            if do_masks:
+            if enable_mask_head:
                 out["pred_masks"] = torch.sigmoid(pred_masks)
 
         if self.training and self.aux_loss:
@@ -1035,13 +1048,14 @@ class DFINETransformer(nn.Module):
                 out_refs[:-1],
                 out_corners[-1],
                 out_logits[-1],
-                aux_masks=aux_masks if do_masks else None,
+                aux_masks=aux_masks if enable_mask_head else None,
             )
             out["enc_aux_outputs"] = self._set_aux_loss(enc_topk_logits_list, enc_topk_bboxes_list)
             out["pre_outputs"] = {"pred_logits": pre_logits, "pred_boxes": pre_bboxes}
             out["enc_meta"] = {"class_agnostic": self.query_select_method == "agnostic"}
 
             if dn_meta is not None:
+                # Include denoising masks for mask supervision on denoising queries
                 out["dn_outputs"] = self._set_aux_loss2(
                     dn_out_logits,
                     dn_out_bboxes,
@@ -1049,7 +1063,11 @@ class DFINETransformer(nn.Module):
                     dn_out_refs,
                     dn_out_corners[-1],
                     dn_out_logits[-1],
+                    aux_masks=dn_aux_masks if enable_mask_head else None,
                 )
+                # Add the final layer's denoising masks separately
+                if enable_mask_head and dn_pred_masks is not None:
+                    out["dn_pred_masks"] = dn_pred_masks
                 out["dn_pre_outputs"] = {"pred_logits": dn_pre_logits, "pred_boxes": dn_pre_bboxes}
                 out["dn_meta"] = dn_meta
 

@@ -271,9 +271,14 @@ class DFINECriterion(nn.Module):
 
     @staticmethod
     def _focal_loss_mask(pred_sel, tgt_sel):
-        # Focal BCE loss for masks
-        alpha = 0.25
+        # Focal BCE loss for masks with adaptive alpha based on foreground ratio
         gamma = 2.0
+
+        # Compute adaptive alpha based on foreground/background ratio per mask
+        # This helps balance the loss when foreground is very small
+        fg_ratio = tgt_sel.flatten(1).mean(dim=1, keepdim=True).unsqueeze(-1)  # [M,1,1]
+        # Alpha closer to 0.5 when balanced, higher when fg is small
+        alpha = 0.5 + 0.25 * (1 - 2 * fg_ratio).clamp(-1, 1)  # Range [0.25, 0.75]
 
         p = torch.sigmoid(pred_sel)
         # BCE per pixel (without reduction)
@@ -540,6 +545,19 @@ class DFINECriterion(nn.Module):
                     }
                     l_dict = {k + f"_dn_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
+
+            # Compute mask loss for final layer denoising (if available)
+            if "dn_pred_masks" in outputs and "masks" in self.losses:
+                dn_final_outputs = {
+                    "pred_masks": outputs["dn_pred_masks"],
+                    "pred_boxes": outputs["dn_outputs"][-1]["pred_boxes"],
+                }
+                l_dict = self.loss_masks(dn_final_outputs, targets, indices_dn, dn_num_boxes)
+                l_dict = {
+                    k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
+                }
+                l_dict = {k + "_dn_final": v for k, v in l_dict.items()}
+                losses.update(l_dict)
 
             # In case of auxiliary traditional head output at first decoder layer.
             if "dn_pre_outputs" in outputs:
