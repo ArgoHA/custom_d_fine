@@ -269,7 +269,35 @@ class DFINECriterion(nn.Module):
 
         return torch.cat(tgt_masks_list, dim=0), valid_match_counts
 
-    def _dice_loss(self, pred_logits, tgt_masks, eps=1e-6):
+    @staticmethod
+    def _focal_loss_mask(pred_sel, tgt_sel):
+        # Focal BCE loss for masks with adaptive alpha based on foreground ratio
+        gamma = 2.0
+
+        # Compute adaptive alpha based on foreground/background ratio per mask
+        # This helps balance the loss when foreground is very small
+        fg_ratio = tgt_sel.flatten(1).mean(dim=1, keepdim=True).unsqueeze(-1)  # [M,1,1]
+        # Alpha closer to 0.5 when balanced, higher when fg is small
+        alpha = 0.5 + 0.25 * (1 - 2 * fg_ratio).clamp(-1, 1)  # Range [0.25, 0.75]
+
+        p = torch.sigmoid(pred_sel)
+        # BCE per pixel (without reduction)
+        bce = F.binary_cross_entropy_with_logits(pred_sel, tgt_sel, reduction="none")
+
+        # Focal modulation: down-weight easy examples
+        p_t = p * tgt_sel + (1 - p) * (1 - tgt_sel)  # p if target=1, else 1-p
+        focal_weight = (1 - p_t) ** gamma
+
+        # Alpha weighting: balance foreground vs background
+        alpha_t = alpha * tgt_sel + (1 - alpha) * (1 - tgt_sel)
+
+        focal_bce = alpha_t * focal_weight * bce
+        loss_per_inst = focal_bce.mean(dim=(1, 2))  # mean over pixels per instance
+        loss_mask_bce = loss_per_inst.mean()  # mean over instances
+        return loss_mask_bce
+
+    @staticmethod
+    def _dice_loss(pred_logits, tgt_masks, eps=1e-6):
         """
         pred_logits: [M, H, W] (logits)
         tgt_masks  : [M, H, W] (0/1)
@@ -316,21 +344,14 @@ class DFINECriterion(nn.Module):
             return {"loss_mask_bce": zero, "loss_mask_dice": zero}
 
         # If for robustness some matched pairs were skipped (no GT mask),
-        # align pred_sel length to tgt_sel (take the same count from the start).
         if pred_sel.shape[0] != tgt_sel.shape[0]:
-            # M = min(pred_sel.shape[0], tgt_sel.shape[0])
-            # pred_sel = pred_sel[:M]
-            # tgt_sel = tgt_sel[:M]
             raise AssertionError(
-                f"Mismatch between number of selected predictions ({pred_sel.shape[0]}) and target masks ({tgt_sel.shape[0]}). "
-                "This indicates a data alignment issue that should be investigated."
+                f"Mismatch between number of selected predictions ({pred_sel.shape[0]})"
+                f"and target masks ({tgt_sel.shape[0]})"
             )
 
-        # BCE (average over pixels per instance, then mean over instances), normalized like others
-        bce_per_pixel = F.binary_cross_entropy_with_logits(pred_sel, tgt_sel, reduction="none")
-        bce_per_inst = bce_per_pixel.mean(dim=(1, 2))
-        loss_mask_bce = bce_per_inst.sum() / max(1, num_boxes)
-
+        # Focal
+        loss_mask_bce = self._focal_loss_mask(pred_sel, tgt_sel)
         # Dice
         loss_mask_dice = self._dice_loss(pred_sel, tgt_sel)
         return {"loss_mask_bce": loss_mask_bce, "loss_mask_dice": loss_mask_dice}
@@ -524,6 +545,19 @@ class DFINECriterion(nn.Module):
                     }
                     l_dict = {k + f"_dn_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
+
+            # Compute mask loss for final layer denoising (if available)
+            if "dn_pred_masks" in outputs and "masks" in self.losses:
+                dn_final_outputs = {
+                    "pred_masks": outputs["dn_pred_masks"],
+                    "pred_boxes": outputs["dn_outputs"][-1]["pred_boxes"],
+                }
+                l_dict = self.loss_masks(dn_final_outputs, targets, indices_dn, dn_num_boxes)
+                l_dict = {
+                    k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict
+                }
+                l_dict = {k + "_dn_final": v for k, v in l_dict.items()}
+                losses.update(l_dict)
 
             # In case of auxiliary traditional head output at first decoder layer.
             if "dn_pre_outputs" in outputs:

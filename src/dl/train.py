@@ -103,6 +103,7 @@ class Trainer:
         self.label_to_name = cfg.train.label_to_name
         self.num_labels = len(cfg.train.label_to_name)
         self.task = cfg.task  # detect/segment
+        self.mask_batch_size = cfg.train.mask_batch_size
         enable_mask_head = self.task == "segment"
 
         self.debug_img_path = Path(self.cfg.train.debug_img_path)
@@ -126,7 +127,7 @@ class Trainer:
             log_file.unlink(missing_ok=True)
             logger.add(log_file, format="{message}", level="INFO", rotation="10 MB")
 
-        logger.info(f"Training task: {self.task}")
+        logger.info(f"Experiment: {cfg.exp}, Task: {self.task}")
         seed = cfg.train.seed + self.rank if self.distributed else cfg.train.seed
         set_seeds(seed, cfg.train.cudnn_fixed)
 
@@ -312,7 +313,6 @@ class Trainer:
 
                 # clean up masks outside of the corresponding bbox
                 out["masks"] = cleanup_masks(out["masks"], out["boxes"])
-
                 del out["mask_probs"]
 
             results.append(out)
@@ -398,15 +398,6 @@ class Trainer:
                     inputs, raw_res, orig_sizes, self.num_labels, self.keep_ratio, self.conf_thresh
                 )
 
-                # collect all preds and gt for metrics
-                for gt_instance, pred_instance in zip(gt, preds):
-                    # Encode masks to RLE to save memory during validation
-                    encode_sample_masks_to_rle(gt_instance)
-                    encode_sample_masks_to_rle(pred_instance)
-
-                    all_preds.append(pred_instance)
-                    all_gt.append(gt_instance)
-
                 if self.to_visualize_eval and idx <= 5:
                     visualize(
                         img_paths,
@@ -416,6 +407,12 @@ class Trainer:
                         path_to_save=self.eval_preds_path,
                         label_to_name=self.label_to_name,
                     )
+
+                # collect all preds and gt for metrics
+                for gt_instance, pred_instance in zip(gt, preds):
+                    # Encode masks to RLE to save memory during validation
+                    all_preds.append(encode_sample_masks_to_rle(pred_instance))
+                    all_gt.append(encode_sample_masks_to_rle(gt_instance))
 
         return all_gt, all_preds
 
@@ -447,6 +444,7 @@ class Trainer:
                 conf_thresh=conf_thresh,
                 iou_thresh=iou_thresh,
                 label_to_name=self.label_to_name,
+                mask_batch_size=self.mask_batch_size,
             )
             metrics = validator.compute_metrics(extended=extended)
             if path_to_save:  # val and test

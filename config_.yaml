@@ -54,6 +54,7 @@ train:
   early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
   num_workers: 12 # In DDP used per GPU
+  mask_batch_size: 1000 # number of images to process at once when computing mask metrics
 
   ### Validation ###
   conf_thresh: 0.5
