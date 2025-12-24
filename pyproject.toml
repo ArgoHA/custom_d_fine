@@ -47,6 +47,15 @@ export = [
   "tensorrt>=10.10.0.31",
 ]
 
+[project.scripts]
+"d-fine-split" = "src.etl.split:main"
+"d-fine-train" = "src.dl.train_entrypoint:main"
+"d-fine-export" = "src.dl.export:main"
+"d-fine-bench" = "src.dl.bench:main"
+"d-fine-infer" = "src.dl.infer:main"
+"d-fine-check-errors" = "src.dl.check_errors:main"
+"d-fine-test-batching" = "src.dl.test_batching:main"
+"d-fine-ov-int8" = "src.dl.ov_int8:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
@@ -82,12 +91,12 @@ pytorch-gpu = ">=2.7.1,<3"
 cuda = "12.9.*"
 
 [tool.pixi.tasks]
-split = "make split"
-train = "make train"
-export = "make export"
-bench = "make bench"
-infer = "make infer"
-check_errors = "make check_errors"
-test_batching = "make test_batching"
-ov_int8 = "make ov_int8"
+split = "d-fine-split"
+train = "d-fine-train"
+export = "d-fine-export"
+bench = "d-fine-bench"
+infer = "d-fine-infer"
+check_errors = "d-fine-check-errors"
+test_batching = "d-fine-test-batching"
+ov_int8 = "d-fine-ov-int8"
 

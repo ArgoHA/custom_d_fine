@@ -1185,7 +1185,7 @@ packages:
 - pypi: ./
   name: d-fine-seg
   version: 0.1.0
-  sha256: 868c12967f4baddafa78a39d22726f11fbe2258f9d94715d5e87b85ee64dae8e
+  sha256: f8ae47a02fe3e32e0d5caa30ac058b02f1fda6fbd4feeb416840f72559d2b886
   requires_dist:
   - albumentations>=2.0.8
   - hydra-core>=1.3.2
