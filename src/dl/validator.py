@@ -110,6 +110,12 @@ class Validator:
             tm_mask = self.torch_metric_mask.compute()
             metrics["mAP_50_mask"] = tm_mask["map_50"].item()
             metrics["mAP_50_95_mask"] = tm_mask["map"].item()
+            metrics["extended_metrics"].update(
+                {
+                    "mAP_50_95_mask": metrics["mAP_50_95_mask"],
+                    "mAP_50_95": metrics["mAP_50_95"],
+                }
+            )
             del tm_mask
 
         if not extended:

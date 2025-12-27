@@ -72,6 +72,7 @@ train:
   ema_momentum: 0.9998
 
   ### Optimizer and Scheduler ###
+  use_scheduler: True
   base_lr: ${train.lrs.${model_name}.base_lr}
   backbone_lr: ${train.lrs.${model_name}.backbone_lr}
   cycler_pct_start: 0.1

@@ -101,7 +101,7 @@ class CustomDataset(Dataset):
         self.shear = cfg.train.mosaic_augs.shear
         self.keep_ratio = cfg.train.keep_ratio
         self.use_one_class = cfg.train.use_one_class
-        self.cases_to_debug = 20
+        self.cases_to_debug = 100
 
         self._init_augs(cfg)
 

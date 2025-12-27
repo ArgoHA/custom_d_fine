@@ -313,7 +313,7 @@ class LQE(nn.Module):
         return scores + quality_score
 
 
-class MaskPixelDecoder(nn.Module):
+class MaskDecoder(nn.Module):
     """
     Fuses multi-scale features from HybridEncoder to produce high-resolution mask features.
 
@@ -330,7 +330,7 @@ class MaskPixelDecoder(nn.Module):
                       flattened memory tensor. Shape: (B, C, H/8, W/8)
 
     Output:
-        Fused mask features at 1/2 resolution. Shape: (B, out_ch, H/2, W/2)
+        Fused mask features at 1/4 resolution. Shape: (B, out_ch, H/4, W/4)
     """
 
     def __init__(self, in_chs, out_ch=256, use_enc=True):
@@ -349,10 +349,27 @@ class MaskPixelDecoder(nn.Module):
             )  # expects enc already in out_ch or hidden_dim
             self.enc_bn = nn.BatchNorm2d(out_ch)
 
-        # upconv to 1/2
-        self.upconv = nn.ConvTranspose2d(out_ch, out_ch, kernel_size=2, stride=2, bias=False)
+        # Normalize after feature fusion to stabilize gradients
+        # GroupNorm is more stable than LayerNorm for conv features
+        self.fusion_norm = nn.GroupNorm(32, out_ch)
+
+        # upconvs (1/8 -> 1/4)
+        self.upconv1 = nn.ConvTranspose2d(out_ch, out_ch, kernel_size=2, stride=2, bias=False)
         self.bn1 = nn.BatchNorm2d(out_ch)
         self.act = nn.ReLU(inplace=True)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                init.constant_(m.weight, 1)
+                init.constant_(m.bias, 0)
+            elif isinstance(m, nn.GroupNorm):
+                init.constant_(m.weight, 1)
+                init.constant_(m.bias, 0)
 
     def forward(self, feats, enc_feat_1_8=None):
         # feats: FPN features [F_s8, F_s16, F_s32] from HybridEncoder's inner_outs
@@ -371,8 +388,11 @@ class MaskPixelDecoder(nn.Module):
             e = F.interpolate(e, size=f0.shape[-2:], mode="bilinear", align_corners=False)
             x = x + e
 
-        # Upconv to 1/2 resolution
-        x = self.act(self.bn1(self.upconv(x)))
+        # Normalize fused features to prevent gradient explosion from additive fusion
+        x = self.fusion_norm(x)
+
+        # Upconv: 1/8 -> 1/4
+        x = self.act(self.bn1(self.upconv1(x)))
         return x  # (B, out_ch, H/2, W/2)
 
 
@@ -641,10 +661,13 @@ class DFINETransformer(nn.Module):
 
         # segmentation head
         if self.enable_mask_head:
-            self.pixel_decoder = MaskPixelDecoder(
+            self.mask_decoder = MaskDecoder(
                 in_chs=feat_channels, out_ch=self.mask_dim, use_enc=True
             )
             self.mask_head = MLP(self.hidden_dim, self.hidden_dim, self.mask_dim, num_layers=3)
+            # Initialize mask head final layer with smaller weights for stability
+            init.xavier_uniform_(self.mask_head.layers[-1].weight, gain=0.1)
+            init.constant_(self.mask_head.layers[-1].bias, 0)
 
         # decoder embedding
         self.learn_query_content = learn_query_content
@@ -936,6 +959,10 @@ class DFINETransformer(nn.Module):
 
     def _mask_logits_from_h(self, h, mask_feat):  # h: [B,Q,C]
         mask_embed = self.mask_head(h)  # [B,Q,Cmask]
+        # Scale by 1/sqrt(C) to normalize dot product (like attention scaling)
+        # This prevents large logits from the sum of C multiplications
+        scale = mask_embed.shape[-1] ** -0.5
+        mask_embed = mask_embed * scale
         # einsum: (B,Q,C) x (B,C,H,W) -> (B,Q,H,W)
         return torch.einsum("bqc,bchw->bqhw", mask_embed, mask_feat)
 
@@ -1008,7 +1035,7 @@ class DFINETransformer(nn.Module):
 
             mem0 = memory[:, :lvl0_len, :]  # (B, H8*W8, C)
             mem0 = mem0.permute(0, 2, 1).reshape(B, C, lvl0_h, lvl0_w)  # (B,C,H8,W8)
-            mask_feat = self.pixel_decoder(inner_feats, enc_feat_1_8=mem0)
+            mask_feat = self.mask_decoder(inner_feats, enc_feat_1_8=mem0)
 
             # Compute masks for regular queries
             pred_masks = self._mask_logits_from_h(hs[-1], mask_feat)  # logits

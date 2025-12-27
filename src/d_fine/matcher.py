@@ -16,6 +16,61 @@ from scipy.optimize import linear_sum_assignment
 from .arch.utils import box_cxcywh_to_xyxy, generalized_box_iou
 
 
+def dice_cost(pred_masks: torch.Tensor, gt_masks: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Compute pairwise Dice cost between predicted and GT masks.
+
+    Args:
+        pred_masks: [num_queries, H, W] sigmoid probabilities
+        gt_masks: [num_targets, H, W] binary masks
+
+    Returns:
+        cost: [num_queries, num_targets] Dice cost (1 - Dice)
+    """
+    pred_masks = pred_masks.flatten(1).float()  # [Q, H*W] - ensure float32
+    gt_masks = gt_masks.flatten(1).float()  # [T, H*W] - ensure float32
+
+    # Compute pairwise intersection and union
+    # pred: [Q, HW], gt: [T, HW] -> need [Q, T]
+    numerator = 2 * torch.einsum("qp,tp->qt", pred_masks, gt_masks)  # [Q, T]
+    denominator = pred_masks.sum(dim=1, keepdim=True) + gt_masks.sum(dim=1, keepdim=False)  # [Q, T]
+
+    dice = (numerator + eps) / (denominator + eps)  # [Q, T]
+    return 1 - dice
+
+
+def sigmoid_focal_cost(
+    pred_logits: torch.Tensor, gt_labels: torch.Tensor, alpha: float = 0.25, gamma: float = 2.0
+) -> torch.Tensor:
+    """
+    Compute sigmoid focal cost for masks (pixel-wise).
+
+    Args:
+        pred_logits: [num_queries, H*W] mask logits
+        gt_labels: [num_targets, H*W] binary ground truth
+
+    Returns:
+        cost: [num_queries, num_targets]
+    """
+    # Ensure float32 for numerical stability and dtype consistency
+    pred_logits = pred_logits.float()
+    gt_labels = gt_labels.float()
+
+    pred_prob = pred_logits.sigmoid()
+
+    # Focal weights
+    neg_cost = (1 - alpha) * (pred_prob**gamma) * (-(1 - pred_prob + 1e-8).log())
+    pos_cost = alpha * ((1 - pred_prob) ** gamma) * (-(pred_prob + 1e-8).log())
+
+    # Cost per pair: mean over pixels
+    # pos_cost: [Q, HW], gt: [T, HW]
+    cost = torch.einsum("qp,tp->qt", pos_cost, gt_labels) + torch.einsum(
+        "qp,tp->qt", neg_cost, (1 - gt_labels)
+    )
+
+    return cost / pred_logits.shape[1]  # normalize by number of pixels
+
+
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
 
@@ -35,19 +90,22 @@ class HungarianMatcher(nn.Module):
             cost_class: This is the relative weight of the classification error in the matching cost
             cost_bbox: This is the relative weight of the L1 error of the bounding box coordinates in the matching cost
             cost_giou: This is the relative weight of the giou loss of the bounding box in the matching cost
+            cost_mask: (optional) weight for mask dice cost in matching
         """
         super().__init__()
         self.cost_class = weight_dict["cost_class"]
         self.cost_bbox = weight_dict["cost_bbox"]
         self.cost_giou = weight_dict["cost_giou"]
+        self.cost_mask = weight_dict.get("cost_mask", 0)  # Optional mask cost
+        self.cost_mask_dice = weight_dict.get("cost_mask_dice", 0)  # Optional dice cost
 
         self.use_focal_loss = use_focal_loss
         self.alpha = alpha
         self.gamma = gamma
 
-        assert (
-            self.cost_class != 0 or self.cost_bbox != 0 or self.cost_giou != 0
-        ), "all costs cant be 0"
+        assert self.cost_class != 0 or self.cost_bbox != 0 or self.cost_giou != 0, (
+            "all costs cant be 0"
+        )
 
     @torch.no_grad()
     def forward(self, outputs: Dict[str, torch.Tensor], targets, return_topk=False):
@@ -107,9 +165,74 @@ class HungarianMatcher(nn.Module):
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
-        # Final cost matrix 3 * self.cost_bbox + 2 * self.cost_class + self.cost_giou
+        # Final cost matrix: [bs*num_queries, total_targets]
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-        C = C.view(bs, num_queries, -1).cpu()
+
+        # Reshape to [bs, num_queries, total_targets] before adding mask cost
+        C = C.view(bs, num_queries, -1)
+
+        # Add mask cost if masks are available and cost weight > 0
+        if (self.cost_mask > 0 or self.cost_mask_dice > 0) and "pred_masks" in outputs:
+            pred_masks = outputs["pred_masks"]  # [B, Q, Hm, Wm]
+            if pred_masks is not None:
+                # Check if any target has masks
+                has_any_masks = any(
+                    "masks" in t and t["masks"] is not None and t["masks"].numel() > 0
+                    for t in targets
+                )
+                if has_any_masks:
+                    B_mask, Q_mask, Hm, Wm = pred_masks.shape
+                    sizes_local = [len(v["boxes"]) for v in targets]
+
+                    # Only apply mask cost if Q matches (handles denoising queries mismatch)
+                    if Q_mask != num_queries:
+                        # pred_masks includes denoising queries, need to extract only the matching queries
+                        # The regular queries are after the denoising queries
+                        dn_num = Q_mask - num_queries
+                        if dn_num > 0:
+                            # Skip denoising queries - take only the regular queries
+                            pred_masks = pred_masks[:, dn_num:, :, :]
+
+                    # Process per batch since targets have varying counts
+                    offset = 0
+                    for b in range(bs):
+                        n_tgt = sizes_local[b]
+                        if n_tgt == 0:
+                            continue
+
+                        t = targets[b]
+                        if "masks" not in t or t["masks"] is None or t["masks"].numel() == 0:
+                            offset += n_tgt
+                            continue
+
+                        tgt_m = t["masks"].float().to(pred_masks.device)  # [Nb, H, W]
+                        if tgt_m.shape[-2:] != (Hm, Wm):
+                            tgt_m = F.interpolate(
+                                tgt_m.unsqueeze(1), size=(Hm, Wm), mode="nearest"
+                            ).squeeze(1)
+
+                        pred_m = pred_masks[b].sigmoid()  # [Q, Hm, Wm]
+
+                        # Dice cost: [Q, Nb]
+                        cost_mc = torch.zeros(num_queries, n_tgt, device=pred_m.device)
+                        if self.cost_mask_dice > 0:
+                            cost_mc = cost_mc + self.cost_mask_dice * dice_cost(pred_m, tgt_m)
+
+                        # Focal cost: [Q, Nb]
+                        if self.cost_mask > 0:
+                            cost_mc = cost_mc + self.cost_mask * sigmoid_focal_cost(
+                                pred_masks[b].flatten(1),  # [Q, Hm*Wm] logits
+                                tgt_m.flatten(1),  # [Nb, Hm*Wm]
+                                alpha=self.alpha,
+                                gamma=self.gamma,
+                            )
+
+                        C[b, :, offset : offset + n_tgt] = (
+                            C[b, :, offset : offset + n_tgt] + cost_mc
+                        )
+                        offset += n_tgt
+
+        C = C.cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
         C = torch.nan_to_num(C, nan=1.0)

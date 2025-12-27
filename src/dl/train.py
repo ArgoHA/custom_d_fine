@@ -190,22 +190,25 @@ class Trainer:
             base_lr=cfg.train.base_lr,
         )
 
-        max_lr = cfg.train.base_lr * 2
-        if cfg.model_name in ["l", "x"]:  # per group max lr for big models
-            max_lr = [
-                cfg.train.backbone_lr * 2,
-                cfg.train.backbone_lr * 2,
-                cfg.train.base_lr * 2,
-                cfg.train.base_lr * 2,
-            ]
-        self.scheduler = OneCycleLR(
-            self.optimizer,
-            max_lr=max_lr,
-            epochs=cfg.train.epochs,
-            steps_per_epoch=len(self.train_loader) // self.b_accum_steps,
-            pct_start=cfg.train.cycler_pct_start,
-            cycle_momentum=False,
-        )
+        self.scheduler = None
+        if cfg.train.use_scheduler:
+            max_lr = cfg.train.base_lr * 2
+            if cfg.model_name in ["l", "x"]:  # per group max lr for big models
+                max_lr = [
+                    cfg.train.backbone_lr * 2,
+                    cfg.train.backbone_lr * 2,
+                    cfg.train.base_lr * 2,
+                    cfg.train.base_lr * 2,
+                ]
+
+            self.scheduler = OneCycleLR(
+                self.optimizer,
+                max_lr=max_lr,
+                epochs=cfg.train.epochs,
+                steps_per_epoch=len(self.train_loader) // self.b_accum_steps,
+                pct_start=cfg.train.cycler_pct_start,
+                cycle_momentum=False,
+            )
 
         if self.amp_enabled:
             self.scaler = GradScaler()
@@ -304,7 +307,7 @@ class Trainer:
                 )
                 out["mask_probs"] = (
                     masks_list[0].to(dtype=torch.float32).detach().cpu()
-                )  # [K',H0,W0]
+                )  # [K, H0, W0]
 
                 # binarize masks
                 out["masks"] = (
@@ -467,7 +470,13 @@ class Trainer:
         torch.save(model_to_save.state_dict(), self.path_to_save / "last.pt")
 
         # mean from chosen metrics
-        decision_metric = np.mean([metrics[metric_name] for metric_name in self.decision_metrics])
+        decision_metric = np.mean(
+            [
+                metrics[metric_name]
+                for metric_name in self.decision_metrics
+                if metric_name in metrics
+            ]
+        )
 
         if decision_metric > best_metric:
             best_metric = decision_metric
@@ -502,7 +511,7 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
                 self.optimizer.step()
 
-            if step_scheduler:
+            if step_scheduler and self.scheduler:
                 self.scheduler.step()
             self.optimizer.zero_grad()
 

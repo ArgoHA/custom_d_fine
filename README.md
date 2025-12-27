@@ -8,6 +8,10 @@ Check out [the video tutorial](https://youtu.be/_uEyRRw4miY) to get familiar wit
 
 This goes beyond the original paper and is developed specifically for this framework. Segmentation task is still an early feature and there are no pretrained weights for segentation head yet. Mosaic augmentation is not recommended for segmentation at this moment.
 
+MaskDecoder takes FPN (preserving fine spatial details for segmentation) and PAN (enriched with both local and global context) embeddings from HybridEncoder. Outputs H/4 masks. Number of masks = number of detected objects. Postprocessing filters out pixels outside of the corresponding detection bounding box.
+
+Note: mAP values calculated are lower then the real ones. It's done to reduce RAM usage and remove low confidence masks (which affect mAP scores).
+
 ## Main scripts
 
 To run the scripts, use the following commands:
