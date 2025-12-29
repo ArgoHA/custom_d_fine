@@ -76,7 +76,10 @@ class Validator:
         self.use_masks = any(_has_masks(p) for p in preds) and any(_has_masks(g) for g in gt)
         if self.use_masks:
             self.torch_metric_mask = MeanAveragePrecision(
-                box_format="xyxy", iou_type="segm", backend="faster_coco_eval"
+                box_format="xyxy",
+                iou_type="segm",
+                sync_on_compute=False,
+                backend="faster_coco_eval",
             )
             self.torch_metric_mask.warn_on_many_detections = False
             # Decode RLE masks for torchmetrics in batches to avoid OOM
