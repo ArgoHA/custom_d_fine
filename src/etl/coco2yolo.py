@@ -20,8 +20,8 @@ def convert_coco_json(json_dir="../coco/annotations/", use_segments=False):
         images = {"%g" % x["id"]: x for x in data["images"]}
         # Write labels file
         for x in tqdm(data["annotations"], desc=f"Annotations {json_file}"):
-            # if x["iscrowd"]:
-            #     continue
+            if x["iscrowd"]:
+                continue
 
             img = images["%g" % x["image_id"]]
             h, w, f = img["height"], img["width"], img["file_name"]
