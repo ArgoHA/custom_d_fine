@@ -377,7 +377,11 @@ class Trainer:
 
         model.eval()
         with torch.inference_mode():
-            for idx, (inputs, targets, img_paths) in enumerate(val_loader):
+            data_iter = val_loader
+            if self.is_main:
+                data_iter = tqdm(val_loader, desc="Evaluating", unit="batch")
+            
+            for idx, (inputs, targets, img_paths) in enumerate(data_iter):
                 inputs = inputs.to(self.device)
                 if self.amp_enabled:
                     with autocast(str(self.device), cache_enabled=True):
