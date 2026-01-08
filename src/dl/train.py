@@ -126,8 +126,8 @@ class Trainer:
         if (not self.distributed) or self.is_main:
             log_file.unlink(missing_ok=True)
             logger.add(log_file, format="{message}", level="INFO", rotation="10 MB")
+            logger.info(f"Experiment: {cfg.exp}, Task: {self.task}")
 
-        logger.info(f"Experiment: {cfg.exp}, Task: {self.task}")
         seed = cfg.train.seed + self.rank if self.distributed else cfg.train.seed
         set_seeds(seed, cfg.train.cudnn_fixed)
 
@@ -193,7 +193,7 @@ class Trainer:
         self.scheduler = None
         if cfg.train.use_scheduler:
             max_lr = cfg.train.base_lr * 2
-            if cfg.model_name in ["l", "x"]:  # per group max lr for big models
+            if cfg.model_name in ["l", "x"] or enable_mask_head:  # per group max lr for big models
                 max_lr = [
                     cfg.train.backbone_lr * 2,
                     cfg.train.backbone_lr * 2,
