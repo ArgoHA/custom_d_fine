@@ -161,13 +161,17 @@ class CustomDataset(Dataset):
 
             self.transform = A.Compose(
                 augs + resize + norm,
-                bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
+                bbox_params=A.BboxParams(
+                    format="pascal_voc", label_fields=["class_labels", "box_indices"]
+                ),
             )
         elif self.mode in ["val", "test", "bench"]:
             self.mosaic_prob = 0
             self.transform = A.Compose(
                 resize + norm,
-                bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
+                bbox_params=A.BboxParams(
+                    format="pascal_voc", label_fields=["class_labels", "box_indices"]
+                ),
             )
         else:
             raise ValueError(
@@ -410,9 +414,22 @@ class CustomDataset(Dataset):
             # Apply transformations
             if self.return_masks:
                 transformed = self.transform(
-                    image=image, bboxes=targets[:, 1:], class_labels=targets[:, 0], masks=masks_list
+                    image=image,
+                    bboxes=targets[:, 1:],
+                    class_labels=targets[:, 0],
+                    masks=masks_list,
+                    box_indices=list(range(len(targets))),
                 )
                 masks = transformed.get("masks", [])
+
+                # Ensure masks and boxes are synchronized
+                num_boxes = len(transformed["bboxes"])
+                if len(masks) != num_boxes:
+                    min_count = min(len(masks), num_boxes)
+                    masks = masks[:min_count]
+                    transformed["bboxes"] = list(transformed["bboxes"])[:min_count]
+                    transformed["class_labels"] = list(transformed["class_labels"])[:min_count]
+
                 if len(masks):
                     masks_t = torch.stack([m.squeeze().to(dtype=torch.uint8) for m in masks], dim=0)
                 else:
@@ -422,7 +439,10 @@ class CustomDataset(Dataset):
                     )
             else:
                 transformed = self.transform(
-                    image=image, bboxes=targets[:, 1:], class_labels=targets[:, 0]
+                    image=image,
+                    bboxes=targets[:, 1:],
+                    class_labels=targets[:, 0],
+                    box_indices=list(range(len(targets))),
                 )
                 masks_t = torch.zeros(
                     (0, transformed["image"].shape[1], transformed["image"].shape[2]),
