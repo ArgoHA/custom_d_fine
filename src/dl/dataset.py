@@ -420,17 +420,13 @@ class CustomDataset(Dataset):
                     masks=masks_list,
                     box_indices=list(range(len(targets))),
                 )
-                masks = transformed.get("masks", [])
+                masks_all = transformed.get("masks", [])
+                surviving_indices = transformed.get("box_indices", [])
 
-                # Ensure masks and boxes are synchronized
-                num_boxes = len(transformed["bboxes"])
-                if len(masks) != num_boxes:
-                    min_count = min(len(masks), num_boxes)
-                    masks = masks[:min_count]
-                    transformed["bboxes"] = list(transformed["bboxes"])[:min_count]
-                    transformed["class_labels"] = list(transformed["class_labels"])[:min_count]
-
-                if len(masks):
+                # Albumentations filters bboxes (and label_fields) but NOT masks.
+                # Use surviving_indices to select only masks corresponding to surviving boxes.
+                if masks_all and surviving_indices:
+                    masks = [masks_all[int(i)] for i in surviving_indices]
                     masks_t = torch.stack([m.squeeze().to(dtype=torch.uint8) for m in masks], dim=0)
                 else:
                     masks_t = torch.zeros(
@@ -450,8 +446,10 @@ class CustomDataset(Dataset):
                 )
 
             image = transformed["image"]  # RGB, CHW
-            boxes = torch.tensor(transformed["bboxes"], dtype=torch.float32)  # abs xyxy
-            labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
+            boxes = torch.as_tensor(
+                np.array(transformed["bboxes"]), dtype=torch.float32
+            )  # abs xyxy
+            labels = torch.as_tensor(np.array(transformed["class_labels"]), dtype=torch.int64)
 
         if self.debug_img_processing and idx <= self.cases_to_debug:
             self._debug_image(idx, image, boxes, labels, image_path, masks=masks_t)
