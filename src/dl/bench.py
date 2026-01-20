@@ -95,27 +95,26 @@ def test_model(
                     targets["masks"][None], processed_size, targets["orig_size"][None], keep_ratio
                 )[batch].cpu()
 
+            gt_dict = {"boxes": gt_boxes, "labels": gt_labels.int()}
+            if "masks" in targets:
+                gt_dict["masks"] = gt_masks
+            all_gt.append(gt_dict)
+
             # inference
             t0 = time.perf_counter()
             model_preds = model(img)
             latency.append((time.perf_counter() - t0) * 1000)
 
             # prepare preds
-            gt_dict = {"boxes": gt_boxes, "labels": gt_labels.int()}
-            if "masks" in targets:
-                gt_dict["masks"] = gt_masks
-            all_gt.append(gt_dict)
-
             pred_dict = {
-                "boxes": torch.from_numpy(model_preds[batch]["boxes"]),
-                "labels": torch.from_numpy(model_preds[batch]["labels"]),
-                "scores": torch.from_numpy(model_preds[batch]["scores"]),
+                "boxes": model_preds[batch]["boxes"].cpu(),
+                "labels": model_preds[batch]["labels"].cpu(),
+                "scores": model_preds[batch]["scores"].cpu(),
             }
             if "mask_probs" in model_preds[batch]:
-                # Binarize
-                pred_dict["masks"] = torch.from_numpy(
-                    model_preds[batch]["mask_probs"] >= conf_thresh
-                ).to(torch.uint8)
+                pred_dict["masks"] = (
+                    (model_preds[batch]["mask_probs"] >= conf_thresh).to(torch.uint8).cpu()
+                )  # binarize
 
             all_preds.append(pred_dict)
 

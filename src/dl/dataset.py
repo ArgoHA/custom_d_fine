@@ -123,7 +123,7 @@ class CustomDataset(Dataset):
                 )
             ]
         else:
-            resize = [A.Resize(self.target_h, self.target_w, interpolation=cv2.INTER_AREA)]
+            resize = [A.Resize(self.target_h, self.target_w, interpolation=cv2.INTER_LINEAR)]
 
         norm = [
             A.Normalize(mean=self.norm[0], std=self.norm[1]),
@@ -153,7 +153,7 @@ class CustomDataset(Dataset):
                 A.Rotate(
                     limit=cfg.train.augs.rotation_degree,
                     p=cfg.train.augs.rotation_p,
-                    interpolation=cv2.INTER_AREA,
+                    interpolation=cv2.INTER_LINEAR,
                     border_mode=cv2.BORDER_CONSTANT,
                     fill=(114, 114, 114),
                 ),
@@ -270,7 +270,7 @@ class CustomDataset(Dataset):
                 scale_h, scale_w = (1.0 * self.target_h / h, 1.0 * self.target_w / w)
 
             img = cv2.resize(
-                img, (int(w * scale_w), int(h * scale_h)), interpolation=cv2.INTER_AREA
+                img, (int(w * scale_w), int(h * scale_h)), interpolation=cv2.INTER_LINEAR
             )
             (h, w, c) = img.shape[:3]
 

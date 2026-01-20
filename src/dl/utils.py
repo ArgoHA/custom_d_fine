@@ -903,7 +903,7 @@ class LetterboxRect(DualTransform):
     ):
         # resize if needed
         if img.shape[1] != new_w or img.shape[0] != new_h:
-            img = cv2.resize(img, (int(new_w), int(new_h)), interpolation=cv2.INTER_AREA)
+            img = cv2.resize(img, (int(new_w), int(new_h)), interpolation=cv2.INTER_LINEAR)
 
         # pad if needed
         if pad_top or pad_bottom or pad_left or pad_right:

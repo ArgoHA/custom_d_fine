@@ -212,6 +212,10 @@ def run(model, train_loader, val_loader, cfg: DictConfig) -> None:
 
             preds = model(img)
             for pred in preds:
+                # Model returns torch tensors, convert to cpu for processing
+                pred["boxes"] = pred["boxes"].cpu()
+                pred["labels"] = pred["labels"].cpu()
+                pred["scores"] = pred["scores"].cpu()
                 pred["norm_boxes"] = abs_xyxy_to_norm_xywh(
                     pred["boxes"], img.shape[0], img.shape[1]
                 )

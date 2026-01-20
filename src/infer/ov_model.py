@@ -70,12 +70,12 @@ class OV_model:
         self.model(self._prepare_inputs(random_image)[0])
 
     @staticmethod
-    def process_boxes(boxes, processed_sizes, orig_sizes, keep_ratio, device):
-        boxes = boxes.numpy()
-        final_boxes = np.zeros_like(boxes)
-        for idx, box in enumerate(boxes):
+    def process_boxes(boxes, processed_sizes, orig_sizes, keep_ratio):
+        """All operations stay on torch tensors."""
+        final_boxes = torch.zeros_like(boxes)
+        for idx in range(boxes.shape[0]):
             final_boxes[idx] = norm_xywh_to_abs_xyxy(
-                box, processed_sizes[idx][0], processed_sizes[idx][1]
+                boxes[idx], processed_sizes[idx][0], processed_sizes[idx][1]
             )
 
         for i in range(len(orig_sizes)):
@@ -85,7 +85,7 @@ class OV_model:
                 )
             else:
                 final_boxes[i] = scale_boxes(final_boxes[i], orig_sizes[i], processed_sizes[i])
-        return torch.tensor(final_boxes).to(device)
+        return final_boxes
 
     @staticmethod
     def process_masks(
@@ -155,7 +155,7 @@ class OV_model:
     def _preprocess(self, img: NDArray, stride: int = 32) -> torch.tensor:
         if not self.keep_ratio:  # simple resize
             img = cv2.resize(
-                img, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_AREA
+                img, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_LINEAR
             )
         elif self.rect:  # keep ratio and cut paddings
             target_height, target_width = self._compute_nearest_size(
@@ -217,7 +217,7 @@ class OV_model:
         B, Q = logits.shape[:2]
 
         boxes = self.process_boxes(
-            boxes, processed_sizes, original_sizes, self.keep_ratio, self.torch_device
+            boxes, processed_sizes, original_sizes, self.keep_ratio
         )  # B x TopQ x 4
 
         # scores/labels and preliminary topK over all Q*C
@@ -253,26 +253,21 @@ class OV_model:
             # gather boxes once
             bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
 
-            out = {
-                "labels": lb.detach().cpu().numpy(),
-                "boxes": bb.detach().cpu().numpy(),
-                "scores": sb.detach().cpu().numpy(),
-            }
+            out = {"labels": lb, "boxes": bb, "scores": sb}
 
             if has_masks and qb.numel() > 0:
                 # gather only kept masks, then cast to half to save mem during resizing
                 mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
                 mb = mb.to(dtype=torch.float16)  # reduce VRAM and RAM during resize
                 # resize to original size (list of length 1)
+                orig_sizes_tensor = torch.tensor([original_sizes[b]])
                 masks_list = self.process_masks(
                     mb.unsqueeze(0),  # [1,K',Hm,Wm]
-                    processed_size=np.array(processed_sizes[b]),  # (Hin, Win)
-                    orig_sizes=np.array(original_sizes[b])[None],  # [1,2]
+                    processed_size=processed_sizes[b],  # (Hin, Win)
+                    orig_sizes=orig_sizes_tensor,  # [1,2]
                     keep_ratio=self.keep_ratio,
                 )
-                out["mask_probs"] = (
-                    masks_list[0].to(dtype=torch.float32).detach().cpu().numpy()
-                )  # [B, H, W]
+                out["mask_probs"] = masks_list[0].to(dtype=torch.float32)  # [K, H, W]
                 # clean up masks outside of the corresponding bbox
                 out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
 
@@ -280,14 +275,14 @@ class OV_model:
 
         return results
 
-    def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, np.ndarray]]:
+    def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, torch.Tensor]]:
         """
         Input image as ndarray (BGR, HWC) or BHWC
         Output:
             List of batch size length. Each element is a dict {"labels", "boxes", "scores"}
-            labels: np.ndarray of shape (N,), dtype np.int64
-            boxes: np.ndarray of shape (N, 4), dtype np.float32, abs values
-            scores: np.ndarray of shape (N,), dtype np.float32
+            labels: torch.Tensor of shape (N,), dtype int64
+            boxes: torch.Tensor of shape (N, 4), dtype float32, abs values
+            scores: torch.Tensor of shape (N,), dtype float32
             masks: np.ndarray of shape (N, H, W), dtype np.uint8. N = number of objects
         """
         processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(inputs)
@@ -350,7 +345,7 @@ def letterbox(
         r = min(r, 1.0)
 
     # Compute padding
-    ratio = r, r  # width, height ratios
+    ratio = r, r  # initial uniform width, height ratios (may be updated below)
     new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
     dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
     if auto:  # minimum rectangle
@@ -364,9 +359,9 @@ def letterbox(
     dh /= 2
 
     if shape[::-1] != new_unpad:  # resize
-        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_AREA)
-    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(np.floor(dh)), int(np.ceil(dh))
+    left, right = int(np.floor(dw)), int(np.ceil(dw))
     im = cv2.copyMakeBorder(
         im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color
     )  # add border
@@ -417,48 +412,50 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     return boxes
 
 
-def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int, to_round=True) -> np.ndarray:
-    # Convert normalized centers to absolute pixel coordinates
+def norm_xywh_to_abs_xyxy(
+    boxes: torch.Tensor, height: int, width: int, to_round=True
+) -> torch.Tensor:
+    """Converts boxes: [N, 4] normalized xywh -> [N, 4] absolute xyxy"""
     x_center = boxes[:, 0] * width
     y_center = boxes[:, 1] * height
     box_width = boxes[:, 2] * width
     box_height = boxes[:, 3] * height
 
-    # Compute the top-left and bottom-right coordinates
     x_min = x_center - (box_width / 2)
     y_min = y_center - (box_height / 2)
     x_max = x_center + (box_width / 2)
     y_max = y_center + (box_height / 2)
 
-    # Convert coordinates to integers
     if to_round:
-        x_min = np.maximum(np.floor(x_min), 1)
-        y_min = np.maximum(np.floor(y_min), 1)
-        x_max = np.minimum(np.ceil(x_max), width - 1)
-        y_max = np.minimum(np.ceil(y_max), height - 1)
-        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+        x_min = torch.clamp(torch.floor(x_min), min=1)
+        y_min = torch.clamp(torch.floor(y_min), min=1)
+        x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
+        y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
     else:
-        x_min = np.maximum(x_min, 0)
-        y_min = np.maximum(y_min, 0)
-        x_max = np.minimum(x_max, width)
-        y_max = np.minimum(y_max, height)
-        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+        x_min = torch.clamp(x_min, min=0)
+        y_min = torch.clamp(y_min, min=0)
+        x_max = torch.clamp(x_max, max=width)
+        y_max = torch.clamp(y_max, max=height)
+    return torch.stack([x_min, y_min, x_max, y_max], dim=1)
 
 
-def cleanup_masks(masks, boxes):
+def cleanup_masks(masks: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
     # clean up masks outside of the corresponding bbox
     N, H, W = masks.shape
-    ys = np.arange(H)[None, :, None]  # (1, H, 1)
-    xs = np.arange(W)[None, None, :]  # (1, 1, W)
+    device = masks.device
+    dtype = masks.dtype
 
-    x1, y1, x2, y2 = boxes.T
+    ys = torch.arange(H, device=device)[None, :, None]  # (1, H, 1)
+    xs = torch.arange(W, device=device)[None, None, :]  # (1, 1, W)
+
+    x1, y1, x2, y2 = boxes.T  # each (N,)
     inside = (
         (xs >= x1[:, None, None])
         & (xs < x2[:, None, None])
         & (ys >= y1[:, None, None])
         & (ys < y2[:, None, None])
     )  # (N, H, W), bool
-    masks = masks * inside.astype(masks.dtype)
+    masks = masks * inside.to(dtype)
     return masks
 
 

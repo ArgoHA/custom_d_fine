@@ -61,15 +61,14 @@ class ONNX_model:
 
     @staticmethod
     def process_boxes(
-        boxes: NDArray,
+        boxes: torch.Tensor,
         proc_sizes,
         orig_sizes,
         keep_ratio: bool,
-    ) -> NDArray:
-        """Convert normalised xywh→absolute xyxy & rescale to original img size."""
-        boxes = boxes.numpy()
-        B, Q, _ = boxes.shape
-        out = np.empty_like(boxes)
+    ) -> torch.Tensor:
+        """Convert normalised xywh→absolute xyxy & rescale to original img size. All torch."""
+        B = boxes.shape[0]
+        out = torch.zeros_like(boxes)
         for b in range(B):
             abs_xyxy = norm_xywh_to_abs_xyxy(boxes[b], proc_sizes[b][0], proc_sizes[b][1])
             if keep_ratio:
@@ -77,7 +76,7 @@ class ONNX_model:
             else:
                 abs_xyxy = scale_boxes(abs_xyxy, orig_sizes[b], proc_sizes[b])
             out[b] = abs_xyxy
-        return torch.from_numpy(out)
+        return out
 
     @staticmethod
     def process_masks(
@@ -141,7 +140,7 @@ class ONNX_model:
     def _preprocess(self, img: NDArray[np.uint8], stride: int = 32) -> NDArray[np.float32]:
         if not self.keep_ratio:  # plain resize
             img = cv2.resize(
-                img, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_AREA
+                img, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_LINEAR
             )
         elif self.rect:  # keep ratio & crop
             h_t, w_t = self._compute_nearest_size(img.shape[:2], max(*self.input_size))
@@ -237,28 +236,21 @@ class ONNX_model:
             # gather boxes once
             bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
 
-            out = {
-                "labels": lb.detach().cpu().numpy(),
-                "boxes": bb.detach().cpu().numpy(),
-                "scores": sb.detach().cpu().numpy(),
-            }
+            out = {"labels": lb, "boxes": bb, "scores": sb}
 
             if has_masks and qb.numel() > 0:
                 # gather only kept masks, then cast to half to save mem during resizing
                 mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
-                mb = torch.from_numpy(mb).to(
-                    dtype=torch.float16
-                )  # reduce VRAM and RAM during resize
+                mb = torch.from_numpy(mb).to(dtype=torch.float16)  # reduce RAM during resize
                 # resize to original size (list of length 1)
+                orig_sizes_tensor = torch.tensor([original_sizes[b]])
                 masks_list = self.process_masks(
                     mb.unsqueeze(0),  # [1,K',Hm,Wm]
-                    processed_size=np.array(processed_sizes[b]),  # (Hin, Win)
-                    orig_sizes=np.array(original_sizes[b])[None],  # [1,2]
+                    processed_size=processed_sizes[b],  # (Hin, Win)
+                    orig_sizes=orig_sizes_tensor,  # [1,2]
                     keep_ratio=self.keep_ratio,
                 )
-                out["mask_probs"] = (
-                    masks_list[0].to(dtype=torch.float32).detach().cpu().numpy()
-                )  # [B, H, W]
+                out["mask_probs"] = masks_list[0].to(dtype=torch.float32)  # [K, H, W]
                 # clean up masks outside of the corresponding bbox
                 out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
 
@@ -266,12 +258,12 @@ class ONNX_model:
 
         return results
 
-    def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, np.ndarray]]:
+    def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, torch.Tensor]]:
         """
         Args:
             inputs (HWC BGR np.uint8) or batch BHWC
         Returns:
-            list[dict] with keys: "labels", "boxes", "scores", "masks"
+            list[dict] with keys: "labels", "boxes", "scores", "mask_probs" (all torch.Tensor)
         """
         proc, proc_sz, orig_sz = self._prepare_inputs(inputs)
         preds = self._predict(proc)
@@ -322,37 +314,50 @@ def letterbox(
     scaleup=True,
     stride=32,
 ):
-    shape = im.shape[:2]  # h,w
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = im.shape[:2]  # current shape [height, width]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
 
+    # Scale ratio (new / old)
     r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
-    if not scaleup:
+    if not scaleup:  # only scale down, do not scale up (for better val mAP)
         r = min(r, 1.0)
 
-    ratio = r, r
+    # Compute padding
+    ratio = r, r  # initial uniform width, height ratios (may be updated below)
     new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
-    if auto:
-        dw, dh = np.mod(dw, stride), np.mod(dh, stride)
-    elif scale_fill:
-        dw = dh = 0.0
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+    elif scale_fill:  # stretch
+        dw, dh = 0.0, 0.0
         new_unpad = (new_shape[1], new_shape[0])
-        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]
+        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
 
-    dw, dh = dw / 2, dh / 2
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
 
-    if shape[::-1] != new_unpad:
-        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_AREA)
-    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    if shape[::-1] != new_unpad:  # resize
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(np.floor(dh)), int(np.ceil(dh))
+    left, right = int(np.floor(dw)), int(np.ceil(dw))
+    im = cv2.copyMakeBorder(
+        im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color
+    )  # add border
     return im, ratio, (dw, dh)
 
 
 def clip_boxes(boxes, shape):
-    boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])
-    boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])
+    # Clip boxes (xyxy) to image shape (height, width)
+    if isinstance(boxes, torch.Tensor):  # faster individually
+        boxes[..., 0].clamp_(0, shape[1])  # x1
+        boxes[..., 1].clamp_(0, shape[0])  # y1
+        boxes[..., 2].clamp_(0, shape[1])  # x2
+        boxes[..., 3].clamp_(0, shape[0])  # y2
+    else:  # np.array (faster grouped)
+        boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
+        boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
 
 
 def scale_boxes_ratio_kept(boxes, img1_shape, img0_shape, ratio_pad=None, padding=True):
@@ -382,46 +387,48 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     return boxes
 
 
-def norm_xywh_to_abs_xyxy(boxes: np.ndarray, height: int, width: int, to_round=True) -> np.ndarray:
-    # Convert normalized centers to absolute pixel coordinates
+def norm_xywh_to_abs_xyxy(
+    boxes: torch.Tensor, height: int, width: int, to_round=True
+) -> torch.Tensor:
+    """Converts boxes: [N, 4] normalized xywh -> [N, 4] absolute xyxy"""
     x_center = boxes[:, 0] * width
     y_center = boxes[:, 1] * height
     box_width = boxes[:, 2] * width
     box_height = boxes[:, 3] * height
 
-    # Compute the top-left and bottom-right coordinates
     x_min = x_center - (box_width / 2)
     y_min = y_center - (box_height / 2)
     x_max = x_center + (box_width / 2)
     y_max = y_center + (box_height / 2)
 
-    # Convert coordinates to integers
     if to_round:
-        x_min = np.maximum(np.floor(x_min), 1)
-        y_min = np.maximum(np.floor(y_min), 1)
-        x_max = np.minimum(np.ceil(x_max), width - 1)
-        y_max = np.minimum(np.ceil(y_max), height - 1)
-        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+        x_min = torch.clamp(torch.floor(x_min), min=1)
+        y_min = torch.clamp(torch.floor(y_min), min=1)
+        x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
+        y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
     else:
-        x_min = np.maximum(x_min, 0)
-        y_min = np.maximum(y_min, 0)
-        x_max = np.minimum(x_max, width)
-        y_max = np.minimum(y_max, height)
-        return np.stack([x_min, y_min, x_max, y_max], axis=1)
+        x_min = torch.clamp(x_min, min=0)
+        y_min = torch.clamp(y_min, min=0)
+        x_max = torch.clamp(x_max, max=width)
+        y_max = torch.clamp(y_max, max=height)
+    return torch.stack([x_min, y_min, x_max, y_max], dim=1)
 
 
-def cleanup_masks(masks, boxes):
+def cleanup_masks(masks: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
     # clean up masks outside of the corresponding bbox
     N, H, W = masks.shape
-    ys = np.arange(H)[None, :, None]  # (1, H, 1)
-    xs = np.arange(W)[None, None, :]  # (1, 1, W)
+    device = masks.device
+    dtype = masks.dtype
 
-    x1, y1, x2, y2 = boxes.T
+    ys = torch.arange(H, device=device)[None, :, None]  # (1, H, 1)
+    xs = torch.arange(W, device=device)[None, None, :]  # (1, 1, W)
+
+    x1, y1, x2, y2 = boxes.T  # each (N,)
     inside = (
         (xs >= x1[:, None, None])
         & (xs < x2[:, None, None])
         & (ys >= y1[:, None, None])
         & (ys < y2[:, None, None])
     )  # (N, H, W), bool
-    masks = masks * inside.astype(masks.dtype)
+    masks = masks * inside.to(dtype)
     return masks
