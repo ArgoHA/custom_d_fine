@@ -57,7 +57,7 @@ train:
 
   batch_size: 8 # physical, should fit on the device. In DDP used per GPU
   b_accum_steps: 1 # grad accumulation (n * bs)
-  epochs: 55
+  epochs: 75
   early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
   num_workers: 12 # In DDP used per GPU
