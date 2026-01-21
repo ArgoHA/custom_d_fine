@@ -29,8 +29,8 @@ base_cfg = {
             "loss_giou": 2,
             "loss_fgl": 0.15,
             "loss_ddf": 1.5,
-            "loss_mask_bce": 5,  # only for mask head
-            "loss_mask_dice": 5,  # only for mask head
+            "loss_mask_bce": 1,  # only for mask head
+            "loss_mask_dice": 1,  # only for mask head
         },
         "losses": ["vfl", "boxes", "local"],  #  "masks" will be added if training with segment task
         "alpha": 0.75,
@@ -42,8 +42,8 @@ base_cfg = {
             "cost_class": 2,
             "cost_bbox": 5,
             "cost_giou": 2,
-            "cost_mask": 5,  # focal mask cost for segmentation matching
-            "cost_mask_dice": 5,  # dice mask cost for segmentation matching
+            "cost_mask": 1,  # focal mask cost for segmentation matching
+            "cost_mask_dice": 1,  # dice mask cost for segmentation matching
         },
         "alpha": 0.25,
         "gamma": 2.0,

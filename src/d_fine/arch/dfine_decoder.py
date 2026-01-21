@@ -315,85 +315,58 @@ class LQE(nn.Module):
 
 class MaskDecoder(nn.Module):
     """
-    Fuses multi-scale features from HybridEncoder to produce high-resolution mask features.
+    Fuses multi-scale PAN features from HybridEncoder to produce high-resolution mask features.
 
-    This module combines:
-    1. FPN (top-down) features from HybridEncoder's inner_outs - multi-scale features
-       BEFORE the bottom-up PAN fusion, preserving fine spatial details for segmentation.
-    2. PAN (bottom-up) stride-8 feature - the finest resolution output AFTER full
-       bidirectional fusion, enriched with both local and global context.
+    This module takes the PAN (bottom-up) outputs from HybridEncoder, which contain
+    multi-scale features after full bidirectional (FPN + PAN) fusion, enriched with
+    both local and global context.
 
     Input:
-        feats: List of FPN features [F_s8, F_s16, F_s32] from HybridEncoder's inner_outs.
+        feats: List of PAN features [F_s8, F_s16, F_s32] from HybridEncoder's outs.
                Shape: [(B, C, H/8, W/8), (B, C, H/16, W/16), (B, C, H/32, W/32)]
-        enc_feat_1_8: PAN stride-8 feature from HybridEncoder's outs, reshaped from the
-                      flattened memory tensor. Shape: (B, C, H/8, W/8)
 
     Output:
         Fused mask features at 1/4 resolution. Shape: (B, out_ch, H/4, W/4)
     """
 
-    def __init__(self, in_chs, out_ch=256, use_enc=True):
+    def __init__(self, in_chs, out_ch=256):
         super().__init__()
-        assert len(in_chs) >= 1 and in_chs[0] is not None, "Need C2 (stride 4) for 1/4 masks"
-        self.use_enc = use_enc
-
+        n_groups = 32
         # 1x1 proj for each backbone level
         self.lateral = nn.ModuleList([nn.Conv2d(c, out_ch, 1, bias=False) for c in in_chs])
-        self.bn = nn.ModuleList([nn.BatchNorm2d(out_ch) for _ in in_chs])
+        self.bn = nn.ModuleList([nn.GroupNorm(n_groups, out_ch) for _ in in_chs])
 
-        # optional encoder projection T(.) to hidden dim (out_ch)
-        if use_enc:
-            self.enc_proj = nn.Conv2d(
-                in_chs[0], out_ch, 1, bias=False
-            )  # expects enc already in out_ch or hidden_dim
-            self.enc_bn = nn.BatchNorm2d(out_ch)
-
-        # Normalize after feature fusion to stabilize gradients
-        # GroupNorm is more stable than LayerNorm for conv features
-        self.fusion_norm = nn.GroupNorm(32, out_ch)
+        # 3x3 conv after fusion to smooth aliasing and add spatial context
+        self.fusion_conv = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+        self.fusion_norm = nn.GroupNorm(n_groups, out_ch)
 
         # upconvs (1/8 -> 1/4)
         self.upconv1 = nn.ConvTranspose2d(out_ch, out_ch, kernel_size=2, stride=2, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.bn1 = nn.GroupNorm(n_groups, out_ch)
         self.act = nn.ReLU(inplace=True)
 
         self._reset_parameters()
 
     def _reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-                init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, nn.BatchNorm2d):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
-            elif isinstance(m, nn.GroupNorm):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
+        init.kaiming_normal_(self.upconv1.weight, mode="fan_out", nonlinearity="relu")
 
-    def forward(self, feats, enc_feat_1_8=None):
-        # feats: FPN features [F_s8, F_s16, F_s32] from HybridEncoder's inner_outs
-        # Project finest FPN level to out_ch
+    def forward(self, feats):
+        # feats: PAN features [F_s8, F_s16, F_s32] from HybridEncoder's outs
+        # Project finest level to out_ch
         f0 = self.bn[0](self.lateral[0](feats[0]))  # (B, out_ch, H/8, W/8)
         x = f0
 
-        # Fuse upsampled coarser FPN levels into finest resolution
+        # Fuse upsampled coarser levels into finest resolution
         for i in range(1, len(feats)):
             t = self.bn[i](self.lateral[i](feats[i]))
             x = x + F.interpolate(t, size=f0.shape[-2:], mode="bilinear", align_corners=False)
 
-        # Add PAN stride-8 feature (detection-enriched context)
-        if self.use_enc and enc_feat_1_8 is not None:
-            e = self.enc_bn(self.enc_proj(enc_feat_1_8))
-            e = F.interpolate(e, size=f0.shape[-2:], mode="bilinear", align_corners=False)
-            x = x + e
-
-        # Normalize fused features to prevent gradient explosion from additive fusion
-        x = self.fusion_norm(x)
+        # Smooth fused features
+        x = self.act(self.fusion_norm(self.fusion_conv(x)))
 
         # Upconv: 1/8 -> 1/4
         x = self.act(self.bn1(self.upconv1(x)))
-        return x  # (B, out_ch, H/2, W/2)
+        return x  # (B, out_ch, H/4, W/4)
 
 
 class TransformerDecoder(nn.Module):
@@ -661,23 +634,14 @@ class DFINETransformer(nn.Module):
 
         # segmentation head
         if self.enable_mask_head:
-            self.mask_decoder = MaskDecoder(
-                in_chs=feat_channels, out_ch=self.mask_dim, use_enc=True
-            )
+            self.mask_decoder = MaskDecoder(in_chs=feat_channels, out_ch=self.mask_dim)
             self.mask_head = MLP(self.hidden_dim, self.hidden_dim, self.mask_dim, num_layers=3)
-            # Initialize mask head final layer with smaller weights for stability
-            init.xavier_uniform_(self.mask_head.layers[-1].weight, gain=0.1)
-            init.constant_(self.mask_head.layers[-1].bias, 0)
 
         # decoder embedding
         self.learn_query_content = learn_query_content
         if learn_query_content:
             self.tgt_embed = nn.Embedding(num_queries, hidden_dim)
         self.query_pos_head = MLP(4, 2 * hidden_dim, hidden_dim, 2)
-
-        # if num_select_queries != self.num_queries:
-        #     layer = TransformerEncoderLayer(hidden_dim, nhead, dim_feedforward, activation='gelu')
-        #     self.encoder = TransformerEncoder(layer, 1)
 
         self.enc_output = nn.Sequential(
             OrderedDict(
@@ -966,9 +930,7 @@ class DFINETransformer(nn.Module):
         # einsum: (B,Q,C) x (B,C,H,W) -> (B,Q,H,W)
         return torch.einsum("bqc,bchw->bqhw", mask_embed, mask_feat)
 
-    def forward(self, all_feats, targets=None):
-        feats = all_feats[0]
-        inner_feats = all_feats[1]
+    def forward(self, feats, targets=None):
         enable_mask_head = self._should_do_masks(targets)
         # input projection and embedding
         memory, spatial_shapes = self._get_encoder_input(feats)
@@ -1028,14 +990,7 @@ class DFINETransformer(nn.Module):
             aux_masks = None
             dn_pred_masks = None
             dn_aux_masks = None
-            B = inner_feats[0].shape[0]
-            C = self.hidden_dim
-            lvl0_h, lvl0_w = spatial_shapes[0]
-            lvl0_len = lvl0_h * lvl0_w
-
-            mem0 = memory[:, :lvl0_len, :]  # (B, H8*W8, C)
-            mem0 = mem0.permute(0, 2, 1).reshape(B, C, lvl0_h, lvl0_w)  # (B,C,H8,W8)
-            mask_feat = self.mask_decoder(inner_feats, enc_feat_1_8=mem0)
+            mask_feat = self.mask_decoder(feats)
 
             # Compute masks for regular queries
             pred_masks = self._mask_logits_from_h(hs[-1], mask_feat)  # logits
