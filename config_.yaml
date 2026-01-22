@@ -84,7 +84,7 @@ train:
 
   augs:
     rotation_degree: 10 # maximum +- rotation
-    rotation_p: 0.0 # probability of the rotation (with above degree)
+    rotation_p: 0.05 # probability of the rotation (with above degree)
     multiscale_prob: 0.0
     rotate_90: 0.05
     left_right_flip: 0.3
