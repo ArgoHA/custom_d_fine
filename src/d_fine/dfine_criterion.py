@@ -304,7 +304,7 @@ class DFINECriterion(nn.Module):
         returns scalar mean Dice loss
         """
         pred = pred_logits.sigmoid()
-        pred = pred.flatten(1)
+        pred = pred.flatten(1)  # [M, H * W]
         tgt = tgt_masks.flatten(1)
         inter = (pred * tgt).sum(dim=1)
         denom = pred.sum(dim=1) + tgt.sum(dim=1) + eps
