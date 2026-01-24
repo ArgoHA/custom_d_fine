@@ -36,7 +36,7 @@ train:
     enabled: False  # set to true to use multi-GPU
     n_gpus: 2  # how many GPUs / processes per node for torchrun
 
-  decision_metrics:
+  decision_metrics: # f1, iou, mAP_50, mAP_50_95, mAP_50_mask, mAP_50_95_mask
   - f1
   - mAP_50
 

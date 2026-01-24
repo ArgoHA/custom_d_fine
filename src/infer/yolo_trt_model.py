@@ -1,25 +1,3 @@
-"""
-YOLO TensorRT wrapper for inference
-
-Trined and exported with:
-
-from ultralytics import YOLO
-
-model_size = "s"
-
-model = YOLO(f"yolo26{model_size}-seg.pt")
-
-model.train(
-    data="/dataset.yaml",
-    epochs=100,
-    imgsz=640,
-    batch=24,
-)
-
-model.export(format="tensorrt", half=True)
-
-"""
-
 from pathlib import Path
 from typing import Dict, List
 
@@ -32,10 +10,10 @@ class YOLO_TRT_model:
     def __init__(
         self,
         model_path: str,
-        conf_thresh: float = 0.5,
+        conf_thresh: float = 0.25,
         iou_thresh: float = 0.5,
         imgsz: int = 640,
-        half: bool = False,
+        half: bool = True,
     ) -> None:
         self.model_path = Path(model_path)
         self.conf_thresh = conf_thresh
@@ -44,7 +22,9 @@ class YOLO_TRT_model:
         self.half = half
         self.model = YOLO(str(self.model_path))
 
-    def __call__(self, img: NDArray) -> List[Dict[str, torch.Tensor]]:
+    def __call__(
+        self, img: NDArray, return_inference_time: bool = False
+    ) -> List[Dict[str, torch.Tensor]]:
         result = self.model(
             img,
             conf=self.conf_thresh,
@@ -54,6 +34,9 @@ class YOLO_TRT_model:
             verbose=False,
             retina_masks=True,
         )[0]
+
+        # Extract raw inference time from YOLO result (in ms)
+        inference_time_ms = result.speed.get("inference", 0.0) if result.speed else 0.0
 
         # Handle empty detections
         if result.boxes is None or len(result.boxes) == 0:
@@ -69,6 +52,10 @@ class YOLO_TRT_model:
                 "boxes": result.boxes.xyxy.to(torch.float32),
                 "scores": result.boxes.conf.to(torch.float32),
                 "labels": result.boxes.cls.to(torch.int64),
-                "mask_probs": result.masks.data.to(torch.float32),
             }
+            if result.masks is not None:
+                out["mask_probs"] = result.masks.data.to(torch.float32)
+
+        if return_inference_time:
+            return [out], inference_time_ms
         return [out]

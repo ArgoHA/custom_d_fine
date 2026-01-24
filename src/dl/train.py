@@ -113,8 +113,12 @@ class Trainer:
         if self.is_main:
             self.init_dirs()
 
-        if enable_mask_head and "iou" not in self.decision_metrics:
-            self.decision_metrics.append("iou")
+        if enable_mask_head:
+            for i, metric in enumerate(self.decision_metrics):
+                if metric == "mAP_50":
+                    self.decision_metrics[i] = "mAP_50_mask"
+                elif metric == "mAP_50_95":
+                    self.decision_metrics[i] = "mAP_50_95_mask"
         if self.use_wandb and self.is_main:
             wandb.init(
                 project=cfg.project_name,

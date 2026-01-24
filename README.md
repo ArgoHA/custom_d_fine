@@ -257,8 +257,9 @@ Another thing to check on your hardware and model is batch size when you run bat
 ## TODO
 
 - Finetune with layers freeze
-- Add support for cashing in dataset
 - Smart dataset preprocessing. Detect small objects. Detect near duplicates (remove from val/test)
+- Copy paste aug
+- Auto batch size
 
 ## Acknowledgement
 

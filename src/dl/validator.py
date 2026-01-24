@@ -27,6 +27,7 @@ class Validator:
         conf_thresh=0.5,
         iou_thresh=0.5,
         mask_batch_size=1000,
+        compute_maps=True,
     ) -> None:
         """
         Format example:
@@ -45,6 +46,7 @@ class Validator:
         self.label_to_name = label_to_name
         self.conf_matrix = None
         self.mask_batch_size = mask_batch_size
+        self.compute_maps = compute_maps
 
         # Use faster_coco_eval backend for numpy 2.x compatibility
         self.torch_metric = MeanAveragePrecision(
@@ -61,7 +63,8 @@ class Validator:
                     torchmetrics_pred[key] = torchmetrics_pred[f"all_{key}"]
                     del torchmetrics_pred[f"all_{key}"]
 
-        self.torch_metric.update(self.torchmetrics_preds, gt)
+        if self.compute_maps:
+            self.torch_metric.update(self.torchmetrics_preds, gt)
 
         # Check if masks available (either dense or RLE-encoded)
         def _has_masks(sample):
@@ -74,7 +77,7 @@ class Validator:
             return False
 
         self.use_masks = any(_has_masks(p) for p in preds) and any(_has_masks(g) for g in gt)
-        if self.use_masks:
+        if self.use_masks and self.compute_maps:
             self.torch_metric_mask = MeanAveragePrecision(
                 box_format="xyxy",
                 iou_type="segm",
@@ -104,27 +107,29 @@ class Validator:
                 del preds_batch, gt_batch
 
     def compute_metrics(self, extended=False, ignore_masks=False, cleanup=True) -> Dict[str, float]:
-        self.torch_metrics = self.torch_metric.compute()
+        if self.compute_maps:
+            self.torch_metrics = self.torch_metric.compute()
 
         metrics = self._compute_main_metrics(self.preds, ignore_masks=ignore_masks)
-        metrics["mAP_50"] = self.torch_metrics["map_50"].item()
-        metrics["mAP_50_95"] = self.torch_metrics["map"].item()
-        if self.use_masks and not ignore_masks:
-            tm_mask = self.torch_metric_mask.compute()
-            metrics["mAP_50_mask"] = tm_mask["map_50"].item()
-            metrics["mAP_50_95_mask"] = tm_mask["map"].item()
-            metrics["extended_metrics"].update(
-                {
-                    "mAP_50_95_mask": metrics["mAP_50_95_mask"],
-                    "mAP_50_95": metrics["mAP_50_95"],
-                }
-            )
-            del tm_mask
+        if self.compute_maps:
+            metrics["mAP_50"] = self.torch_metrics["map_50"].item()
+            metrics["mAP_50_95"] = self.torch_metrics["map"].item()
+            if self.use_masks and not ignore_masks:
+                tm_mask = self.torch_metric_mask.compute()
+                metrics["mAP_50_mask"] = tm_mask["map_50"].item()
+                metrics["mAP_50_95_mask"] = tm_mask["map"].item()
+                metrics["extended_metrics"].update(
+                    {
+                        "mAP_50_95_mask": metrics["mAP_50_95_mask"],
+                        "mAP_50_95": metrics["mAP_50_95"],
+                    }
+                )
+                del tm_mask
 
         if not extended:
             metrics.pop("extended_metrics", None)
         # Clean up large data structures to free RAM
-        if cleanup:
+        if cleanup and self.compute_maps:
             self._cleanup_torchmetrics()
         return metrics
 
