@@ -56,32 +56,7 @@ python -m src.dl.train exp_name=my_experiment
 python -m src.dl.export exp_name=my_experiment
 ```
 
-For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and run `make train` as usual. Here are examples with and without DDP on a custom dataset.
-
-Detection task, M size:
-
-```
-+------------------+-----------------+----------------+----------------+
-| Exp              | Train epoch (s) |  Val epoch (s) |   Total (s)    |
-+------------------+-----------------+----------------+----------------|
-| 1 gpu, bs 24     |       160       |       10       |      170       |
-| 2 gpus, bs 12    |       103       |       7        |      110       |
-| 2 gpus, bs 24    |       83        |       8        |      91        |
-| 2 gpus, bs 36    |       81        |       10       |      91        |
-+------------------+-----------------+----------------+----------------+
-```
-
-Segmentation task, M size (same dataset, but bboxes instead of polygons):
-
-```
-+------------------+-----------------+----------------+----------------+
-| Exp              | Train epoch (s) |  Val epoch (s) |   Total (s)    |
-+------------------+-----------------+----------------+----------------|
-| 1 gpu, bs 24     |       248       |       65       |      313       |
-| 2 gpus, bs 12    |       145       |       52       |      197       |
-| 2 gpus, bs 24    |       129       |       62       |      191       |
-+------------------+-----------------+----------------+----------------+
-```
+For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and run `make train` as usual. 
 
 ## Labels format
 
