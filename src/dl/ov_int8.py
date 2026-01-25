@@ -20,6 +20,7 @@ def main(cfg: DictConfig):
     """
     Run INT8 quantization with accuracy control on OpenVINO IR model using f1 score.
     Expects FP32 IR at <cfg.train.path_to_save>/model.xml.
+    Supports both detection and segmentation tasks.
     """
     # Resolve latest experiment (same as in train/export scripts)
     cfg.exp = get_latest_experiment_name(cfg.exp, cfg.train.path_to_save)
@@ -27,7 +28,10 @@ def main(cfg: DictConfig):
     fp32_xml_path = save_dir / "model.xml"
     assert fp32_xml_path.exists(), f"FP32 OpenVINO model not found: {fp32_xml_path}"
 
+    # Determine task (detect or segment)
+    enable_mask_head = cfg.task == "segment"
     logger.info(f"Using FP32 OpenVINO model: {fp32_xml_path}")
+    logger.info(f"Task: {cfg.task}, Mask head enabled: {enable_mask_head}")
 
     #  Data: val loader (used both for calibration & validation)
     base_loader = Loader(
@@ -65,10 +69,15 @@ def main(cfg: DictConfig):
         """
         compiled_model: openvino.CompiledModel
         validation_loader: torch.utils.data.DataLoader
-        returns: mAP_50 (float)
         """
         output_logits = compiled_model.output("logits")
         output_boxes = compiled_model.output("boxes")
+        output_masks = None
+        if enable_mask_head:
+            try:
+                output_masks = compiled_model.output("mask_probs")
+            except RuntimeError:
+                logger.warning("mask_probs output not found in model, disabling mask head")
 
         all_preds: List[Dict[str, torch.Tensor]] = []
         all_gt: List[Dict[str, torch.Tensor]] = []
@@ -86,6 +95,12 @@ def main(cfg: DictConfig):
 
             outputs = {"pred_logits": logits, "pred_boxes": boxes}
 
+            # Handle mask outputs for segmentation
+            if output_masks is not None:
+                masks_np = ov_res[output_masks]
+                pred_masks = torch.from_numpy(masks_np)
+                outputs["pred_masks"] = pred_masks
+
             orig_sizes = torch.stack([t["orig_size"] for t in targets], dim=0).float()
 
             preds = Trainer.preds_postprocess(
@@ -94,7 +109,7 @@ def main(cfg: DictConfig):
                 orig_sizes,
                 num_labels=num_labels,
                 keep_ratio=keep_ratio,
-                conf_thresh=cfg.train.conf_thresh,
+                conf_thresh=conf_thresh,
             )
             gt = Trainer.gt_postprocess(
                 inputs,
