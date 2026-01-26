@@ -11,13 +11,11 @@ class YOLO_TRT_model:
         self,
         model_path: str,
         conf_thresh: float = 0.25,
-        iou_thresh: float = 0.5,
         imgsz: int = 640,
         half: bool = True,
     ) -> None:
         self.model_path = Path(model_path)
         self.conf_thresh = conf_thresh
-        self.iou_thresh = iou_thresh
         self.imgsz = imgsz
         self.half = half
         self.model = YOLO(str(self.model_path))
@@ -28,7 +26,6 @@ class YOLO_TRT_model:
         result = self.model(
             img,
             conf=self.conf_thresh,
-            iou=self.iou_thresh,
             imgsz=self.imgsz,
             half=self.half,
             verbose=False,
