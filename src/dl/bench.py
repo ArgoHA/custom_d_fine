@@ -242,7 +242,7 @@ def main(cfg: DictConfig):
     models = {
         "OpenVINO": ov_model,
         "Torch": torch_model,
-        "D-FINE-seg TensorRT": trt_model,
+        "TensorRT": trt_model,
         "ONNX": onnx_model,
     }
     if ov_int8_path.exists():
