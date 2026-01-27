@@ -352,7 +352,7 @@ class MaskDecoder(nn.Module):
 
     def forward(self, feats):
         # feats: PAN features [F_s8, F_s16, F_s32] from HybridEncoder's outs
-        # Project finest level to out_ch
+        # Take the biggest resolution feature as the base
         f0 = self.bn[0](self.lateral[0](feats[0]))  # (B, out_ch, H/8, W/8)
         x = f0
 

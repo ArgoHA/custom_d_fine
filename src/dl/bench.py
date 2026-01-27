@@ -65,6 +65,7 @@ def test_model(
     keep_ratio: bool,
     device: str,
     label_to_name: Dict[int, str],
+    compute_maps: bool,
 ):
     logger.info(f"Testing {name} model")
     latency = []
@@ -74,6 +75,14 @@ def test_model(
 
     output_path = output_path / name
     output_path.mkdir(exist_ok=True, parents=True)
+
+    # Warmup iterations
+    first_batch = next(iter(test_loader))
+    warmup_img = cv2.imread(str(data_path / "images" / first_batch[2][0]))
+    for _ in range(10):
+        _ = model(warmup_img)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     for _, targets, img_paths in tqdm(test_loader, total=len(test_loader)):
         for img_path, targets in zip(img_paths, targets):
@@ -100,11 +109,14 @@ def test_model(
                 gt_dict["masks"] = gt_masks
             all_gt.append(gt_dict)
 
-            # inference
+            # inference with CUDA synchronization for accurate timing
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             t0 = time.perf_counter()
             model_preds = model(img)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             latency.append((time.perf_counter() - t0) * 1000)
-
             # prepare preds
             pred_dict = {
                 "boxes": model_preds[batch]["boxes"].cpu(),
@@ -134,12 +146,10 @@ def test_model(
         conf_thresh=conf_thresh,
         iou_thresh=iou_thresh,
         label_to_name=label_to_name,
+        compute_maps=compute_maps,  # as inference done with a conf threshold, mAPs don't make much sense
     )
-    metrics = validator.compute_metrics(extended=False)
 
-    # as inference done with a conf threshold, mAPs don't make much sense
-    metrics.pop("mAP_50")
-    metrics.pop("mAP_50_95")
+    metrics = validator.compute_metrics(extended=False)
     metrics["latency"] = round(np.mean(latency[1:]), 1)
     return metrics
 
@@ -148,6 +158,8 @@ def test_model(
 def main(cfg: DictConfig):
     conf_thresh = 0.5
     iou_thresh = 0.5
+    compute_maps = False
+    to_visualize = True
 
     cfg.exp = get_latest_experiment_name(cfg.exp, cfg.train.path_to_save)
 
@@ -230,7 +242,7 @@ def main(cfg: DictConfig):
     models = {
         "OpenVINO": ov_model,
         "Torch": torch_model,
-        "TensorRT": trt_model,
+        "D-FINE-seg TensorRT": trt_model,
         "ONNX": onnx_model,
     }
     if ov_int8_path.exists():
@@ -245,15 +257,16 @@ def main(cfg: DictConfig):
             model_name,
             conf_thresh,
             iou_thresh,
-            to_visualize=True,
+            to_visualize=to_visualize,
             processed_size=tuple(cfg.train.img_size),
             keep_ratio=cfg.train.keep_ratio,
             device=cfg.train.device,
             label_to_name=cfg.train.label_to_name,
+            compute_maps=compute_maps,
         )
 
-    metrcs = pd.DataFrame.from_dict(all_metrics, orient="index")
-    tabulated_data = tabulate(metrcs.round(4), headers="keys", tablefmt="pretty", showindex=True)
+    metrics = pd.DataFrame.from_dict(all_metrics, orient="index")
+    tabulated_data = tabulate(metrics.round(4), headers="keys", tablefmt="pretty", showindex=True)
     print("\n" + tabulated_data)
 
 
