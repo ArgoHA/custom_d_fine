@@ -3,7 +3,6 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 from loguru import logger
 from numpy.typing import NDArray
 from torchvision.ops import nms
@@ -116,37 +115,32 @@ class Torch_model:
             pred_masks = pred_masks.unsqueeze(0)  # -> [1,Q,Hm,Wm]
 
         B, Q, Hm, Wm = pred_masks.shape
-        device = pred_masks.device
-        dtype = pred_masks.dtype
-
-        # 1) Upsample masks to processed (input) size
         proc_h, proc_w = int(processed_size[0]), int(processed_size[1])
-        masks_proc = torch.nn.functional.interpolate(
-            pred_masks, size=(proc_h, proc_w), mode="bilinear", align_corners=False
-        )  # [B,Q,Hp,Wp] with Hp=proc_h, Wp=proc_w
 
         out = []
         for b in range(B):
             H0, W0 = int(orig_sizes[b, 0].item()), int(orig_sizes[b, 1].item())
-            m = masks_proc[b]  # [Q, Hp, Wp]
+            m = pred_masks[b]  # [Q, Hm, Wm]
+
             if keep_ratio:
                 # Compute same gain/pad as in scale_boxes_ratio_kept
                 gain = min(proc_h / H0, proc_w / W0)
                 padw = round((proc_w - W0 * gain) / 2 - 0.1)
                 padh = round((proc_h - H0 * gain) / 2 - 0.1)
 
-                # Remove padding before final resize
-                y1 = max(padh, 0)
-                y2 = proc_h - max(padh, 0)
-                x1 = max(padw, 0)
-                x2 = proc_w - max(padw, 0)
+                # Calculate crop region in mask space (scaled from processed_size to mask_size)
+                scale_h, scale_w = Hm / proc_h, Wm / proc_w
+                y1 = int(max(padh, 0) * scale_h)
+                y2 = int((proc_h - max(padh, 0)) * scale_h)
+                x1 = int(max(padw, 0) * scale_w)
+                x2 = int((proc_w - max(padw, 0)) * scale_w)
                 m = m[:, y1:y2, x1:x2]  # [Q, cropped_h, cropped_w]
 
-            # 2) Resize to original size
+            # Single resize directly to original size
             m = torch.nn.functional.interpolate(
                 m.unsqueeze(0), size=(H0, W0), mode="bilinear", align_corners=False
             ).squeeze(0)  # [Q, H0, W0]
-            out.append(m.clamp_(0, 1).to(device=device, dtype=dtype))
+            out.append(m.clamp_(0, 1))
 
         if single:
             return [out[0]]
@@ -208,9 +202,8 @@ class Torch_model:
             out = {"labels": lb, "boxes": bb, "scores": sb}
 
             if has_masks and qb.numel() > 0:
-                # gather only kept masks, then cast to half to save mem during resizing
+                # gather only kept masks
                 mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
-                mb = mb.to(dtype=torch.float16)  # reduce VRAM and RAM during resize
                 # resize to original size (list of length 1)
                 orig_sizes_tensor = torch.tensor([original_sizes[b]], device=mb.device)
                 masks_list = self.process_masks(
@@ -219,7 +212,7 @@ class Torch_model:
                     orig_sizes=orig_sizes_tensor,  # [1,2]
                     keep_ratio=self.keep_ratio,
                 )
-                out["mask_probs"] = masks_list[0].to(dtype=torch.float32)  # [K, H, W]
+                out["mask_probs"] = masks_list[0]  # [K, H, W]
                 # clean up masks outside of the corresponding bbox
                 out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
 
@@ -253,15 +246,13 @@ class Torch_model:
                 img, (self.input_size[0], self.input_size[1]), stride=stride, auto=False
             )[0]
 
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, then HWC to CHW
-        img = np.ascontiguousarray(img, dtype=self.np_dtype)
-        img /= 255.0
+        img = img[..., ::-1].transpose(2, 0, 1)  # BGR to RGB, HWC to CHW
+        img = np.ascontiguousarray(img, dtype=np.uint8)
 
         # save debug image
         if self.debug_mode:
             debug_img = img.reshape([1, *img.shape])
             debug_img = debug_img[0].transpose(1, 2, 0)  # CHW to HWC
-            debug_img = (debug_img * 255.0).astype(np.uint8)  # Convert to uint8
             debug_img = debug_img[:, :, ::-1]  # RGB to BGR for saving
             cv2.imwrite("torch_infer.jpg", debug_img)
         return img
@@ -278,7 +269,7 @@ class Torch_model:
         elif isinstance(inputs, np.ndarray) and inputs.ndim == 4:  # batch of images
             processed_inputs = np.zeros(
                 (inputs.shape[0], self.channels, self.input_size[0], self.input_size[1]),
-                dtype=self.np_dtype,
+                dtype=np.uint8,
             )
             for idx, image in enumerate(inputs):
                 processed_inputs[idx] = self._preprocess(image)
@@ -287,11 +278,17 @@ class Torch_model:
                     (processed_inputs[idx].shape[1], processed_inputs[idx].shape[2])
                 )
 
-        tensor = torch.from_numpy(processed_inputs)  # no copying
+        # Transfer to device and normalize there (faster for GPU)
         if self.device == "cuda":
-            tensor = tensor.pin_memory().to(self.device, non_blocking=True)
+            tensor = torch.from_numpy(processed_inputs).to(self.device, non_blocking=True)
+            tensor = tensor.to(dtype=torch.float32).div_(255.0)
         else:
-            tensor = tensor.to(self.device)
+            tensor = (
+                torch.from_numpy(processed_inputs)
+                .to(dtype=torch.float32)
+                .div_(255.0)
+                .to(self.device)
+            )
         return tensor, processed_sizes, original_sizes
 
     @torch.no_grad()
