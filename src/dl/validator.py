@@ -603,18 +603,23 @@ class Validator:
         precisions, recalls, f1_scores = [], [], []
 
         # Store the original predictions to reset after each threshold
+        # Use self.preds instead of self.torchmetrics_preds since we compute box-based metrics
         for threshold in thresholds:
-            torchmetrics_preds = copy.deepcopy(self.torchmetrics_preds)
-            # remove masks as they are already filtered and we wll get a shape mismatch
-            if not torchmetrics_preds:
+            preds_copy = copy.deepcopy(self.preds)
+            if not preds_copy:
                 return
-            for torchmetrics_pred in torchmetrics_preds:
-                if "masks" in torchmetrics_pred:
-                    del torchmetrics_pred["masks"]
+            # Remove masks as we're computing box-based metrics only
+            for pred in preds_copy:
+                if "masks" in pred:
+                    del pred["masks"]
+                if "masks_rle" in pred:
+                    del pred["masks_rle"]
+                if "mask_probs" in pred:
+                    del pred["mask_probs"]
 
             # Filter predictions based on the current threshold
-            filtered_preds = filter_preds(torchmetrics_preds, threshold, mask_source="masks")
-            # Compute metrics with the filtered predictions
+            filtered_preds = filter_preds(preds_copy, threshold, mask_source="masks")
+            # Compute metrics with the filtered predictions (using boxes only)
             metrics = self._compute_main_metrics(filtered_preds, ignore_masks=True)
             precisions.append(metrics["precision"])
             recalls.append(metrics["recall"])
