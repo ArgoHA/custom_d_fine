@@ -453,23 +453,47 @@ def cleanup_masks(masks: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
 
 
 if __name__ == "__main__":
-    import time
-
     model = OV_model(
-        model_path="/home/argo/Desktop/Projects/Veryfi/crops/output/models/teee_2025-12-17/model.xml",
+        model_path="model.xml",
         n_outputs=1,
         input_height=640,
         input_width=640,
-        conf_thresh=0.4,
+        conf_thresh=0.5,
+        half=False,
     )
 
-    img = cv2.imread("/home/argo/Desktop/Projects/Veryfi/sign_det/data/test/test_image.jpg")
+    img = cv2.imread("test_image.jpg")
 
-    latency = []
-    for _ in range(30):
-        t0 = time.perf_counter()
-        res = model(img)
-        latency.append((time.perf_counter() - t0) * 1000)
+    res = model(img)
 
-    print(res)
-    print("LATENCY:", np.mean(latency[1:]))
+    # write a functioun to visualize the model outout (masks)
+    for i in range(len(res[0]["boxes"])):
+        box = res[0]["boxes"][i].cpu().numpy().astype(int)
+        score = res[0]["scores"][i].cpu().numpy()
+        label = res[0]["labels"][i].cpu().numpy()
+        mask = res[0]["mask_probs"][i].cpu().numpy()
+        mask = (mask > 0.5).astype(np.uint8) * 255
+
+        cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (255, 180, 100), 2)
+        cv2.putText(
+            img,
+            f"Document {score:.2f}",
+            (box[0], box[1] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (255, 180, 100),
+            2,
+        )
+
+        # apply blueish colored mask
+        colored_mask = np.zeros_like(img)
+        colored_mask[:, :, 0] = mask  # Blue channel (full)
+        colored_mask[:, :, 1] = mask * 120 // 255  # Green channel
+        colored_mask[:, :, 2] = mask * 60 // 255  # Red channel
+        img = cv2.addWeighted(img, 1.0, colored_mask, 0.2, 0)
+
+        # draw solid mask contours/edges
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(img, contours, -1, (255, 180, 100), 2)
+
+    cv2.imwrite("out.png", img)
