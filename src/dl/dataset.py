@@ -147,6 +147,7 @@ class CustomDataset(Dataset):
                     rotate=[90, 90],
                     p=cfg.train.augs.rotate_90,
                     fit_output=True,
+                    mask_interpolation=cv2.INTER_LINEAR,
                 ),
                 A.HorizontalFlip(p=cfg.train.augs.left_right_flip),
                 A.VerticalFlip(p=cfg.train.augs.up_down_flip),
@@ -156,6 +157,7 @@ class CustomDataset(Dataset):
                     interpolation=cv2.INTER_LINEAR,
                     border_mode=cv2.BORDER_CONSTANT,
                     fill=(114, 114, 114),
+                    mask_interpolation=cv2.INTER_LINEAR,
                 ),
             ]
 
@@ -164,6 +166,7 @@ class CustomDataset(Dataset):
                 bbox_params=A.BboxParams(
                     format="pascal_voc", label_fields=["class_labels", "box_indices"]
                 ),
+                mask_interpolation=cv2.INTER_LINEAR,
             )
         elif self.mode in ["val", "test", "bench"]:
             self.mosaic_prob = 0
@@ -172,13 +175,14 @@ class CustomDataset(Dataset):
                 bbox_params=A.BboxParams(
                     format="pascal_voc", label_fields=["class_labels", "box_indices"]
                 ),
+                mask_interpolation=cv2.INTER_LINEAR,
             )
         else:
             raise ValueError(
                 f"Unknown mode: {self.mode}, choose from ['train', 'val', 'test', 'bench']"
             )
 
-        self.mosaic_transform = A.Compose(norm)
+        self.mosaic_transform = A.Compose(norm, mask_interpolation=cv2.INTER_LINEAR)
 
     def _debug_image(
         self,
@@ -409,7 +413,7 @@ class CustomDataset(Dataset):
             masks_list = []
             if self.return_masks and len(polys_abs) > 0:
                 H, W = image.shape[0], image.shape[1]
-                masks_list = [poly_abs_to_mask(p, H, W) for p in polys_abs]
+                masks_list = [poly_abs_to_mask(p, H, W) for p in polys_abs]  # original shape
 
             # Apply transformations
             if self.return_masks:
@@ -683,6 +687,8 @@ class Loader:
                 if m.numel() == 0:
                     continue
                 m = m.unsqueeze(1).float()  # (N,1,H,W)
-                m = torch.nn.functional.interpolate(m, size=(new_h, new_w), mode="nearest")
+                m = torch.nn.functional.interpolate(
+                    m, size=(new_h, new_w), mode="bilinear", align_corners=False
+                )
                 t["masks"] = (m.squeeze(1) > 0.5).to(torch.uint8)  # back to (N,H,W)
         return images, targets, img_paths

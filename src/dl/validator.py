@@ -485,7 +485,9 @@ class Validator:
             # If spatial sizes differ, resize preds to GT resolution (nearest)
             if Np > 0 and Ng > 0 and pm.shape[-2:] != gm.shape[-2:]:
                 pm = pm.unsqueeze(1).float()  # [Np,1,Hp,Wp]
-                pm = torch.nn.functional.interpolate(pm, size=gm.shape[-2:], mode="nearest")
+                pm = torch.nn.functional.interpolate(
+                    pm, size=gm.shape[-2:], mode="bilinear", align_corners=False
+                )
                 pm = (pm > 0.5).to(torch.uint8)[:, 0]  # back to [Np,H,W]
 
             if Np > 0 and Ng > 0:

@@ -21,7 +21,7 @@ class YOLO_TRT_model:
         self.model = YOLO(str(self.model_path))
 
     def __call__(
-        self, img: NDArray, return_inference_time: bool = False
+        self, img: NDArray, return_raw_latency: bool = False
     ) -> List[Dict[str, torch.Tensor]]:
         result = self.model(
             img,
@@ -53,6 +53,6 @@ class YOLO_TRT_model:
             if result.masks is not None:
                 out["mask_probs"] = result.masks.data.to(torch.float32)
 
-        if return_inference_time:
+        if return_raw_latency:
             return [out], inference_time_ms
         return [out]

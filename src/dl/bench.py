@@ -66,6 +66,7 @@ def test_model(
     device: str,
     label_to_name: Dict[int, str],
     compute_maps: bool,
+    to_draw_gt: bool,
 ):
     logger.info(f"Testing {name} model")
     latency = []
@@ -117,6 +118,7 @@ def test_model(
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             latency.append((time.perf_counter() - t0) * 1000)
+
             # prepare preds
             pred_dict = {
                 "boxes": model_preds[batch]["boxes"].cpu(),
@@ -130,10 +132,14 @@ def test_model(
 
             all_preds.append(pred_dict)
 
+            gt_to_vis = [gt_dict]
+            if not to_draw_gt:
+                gt_to_vis = [{"boxes": [], "labels": []}]
+
             if to_visualize:
                 visualize(
                     img_paths,
-                    [gt_dict],
+                    gt_to_vis,
                     [pred_dict],
                     dataset_path=data_path / "images",
                     path_to_save=output_path,
@@ -160,6 +166,7 @@ def main(cfg: DictConfig):
     iou_thresh = 0.5
     compute_maps = False
     to_visualize = True
+    to_draw_gt = True
 
     cfg.exp = get_latest_experiment_name(cfg.exp, cfg.train.path_to_save)
 
@@ -263,10 +270,12 @@ def main(cfg: DictConfig):
             device=cfg.train.device,
             label_to_name=cfg.train.label_to_name,
             compute_maps=compute_maps,
+            to_draw_gt=to_draw_gt,
         )
 
-    metrics = pd.DataFrame.from_dict(all_metrics, orient="index")
-    tabulated_data = tabulate(metrics.round(4), headers="keys", tablefmt="pretty", showindex=True)
+    metrics = pd.DataFrame.from_dict(all_metrics, orient="index").round(3)
+    metrics.to_csv(Path(cfg.train.path_to_save) / "bench_metrics.csv")
+    tabulated_data = tabulate(metrics, headers="keys", tablefmt="pretty", showindex=True)
     print("\n" + tabulated_data)
 
 

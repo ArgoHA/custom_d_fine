@@ -257,9 +257,9 @@ class DFINECriterion(nn.Module):
             if J.numel() == 0:
                 continue
             m_sel = m[J]  # [Mi, H, W]
-            # resize to prediction size
+            # resize to prediction size using bilinear for smoother boundaries
             m_sel = m_sel.unsqueeze(1).float().to(device)  # [Mi,1,H,W]
-            m_sel = F.interpolate(m_sel, size=(out_h, out_w), mode="nearest")  # preserve binary
+            m_sel = F.interpolate(m_sel, size=(out_h, out_w), mode="bilinear", align_corners=False)
             m_sel = m_sel.squeeze(1).clamp_(0, 1)  # [Mi,out_h,out_w]
             tgt_masks_list.append(m_sel)
             valid_match_counts += m_sel.shape[0]
@@ -310,6 +310,58 @@ class DFINECriterion(nn.Module):
         denom = pred.sum(dim=1) + tgt.sum(dim=1) + eps
         dice = 1.0 - (2.0 * inter + eps) / denom
         return dice.mean() if dice.numel() > 0 else pred_logits.sum() * 0.0
+
+    # @staticmethod
+    # def _boundary_loss(pred_logits, tgt_masks, eps=1e-6):
+    #     """
+    #     Boundary-aware loss: emphasizes mask edges for sharper boundaries.
+    #     Uses Laplacian edge detection to find boundaries and applies weighted BCE.
+
+    #     pred_logits: [M, H, W] (logits)
+    #     tgt_masks  : [M, H, W] (0/1 or soft)
+    #     returns scalar mean boundary loss
+    #     """
+    #     if pred_logits.shape[0] == 0:
+    #         return pred_logits.sum() * 0.0
+
+    #     # Sobel-like edge detection for target masks to find boundaries
+    #     # Use simple gradient magnitude approximation
+    #     tgt = tgt_masks.unsqueeze(1)  # [M, 1, H, W]
+
+    #     # Compute gradients using simple differences (faster than Sobel convolution)
+    #     grad_x = torch.abs(tgt[:, :, :, 1:] - tgt[:, :, :, :-1])  # [M, 1, H, W-1]
+    #     grad_y = torch.abs(tgt[:, :, 1:, :] - tgt[:, :, :-1, :])  # [M, 1, H-1, W]
+
+    #     # Pad to original size
+    #     grad_x = F.pad(grad_x, (0, 1, 0, 0))  # [M, 1, H, W]
+    #     grad_y = F.pad(grad_y, (0, 0, 0, 1))  # [M, 1, H, W]
+
+    #     # Boundary mask: where gradient magnitude > 0
+    #     boundary_weight = (grad_x + grad_y).squeeze(1)  # [M, H, W]
+    #     boundary_weight = (boundary_weight > 0.1).float()
+
+    #     # Dilate boundaries slightly for better supervision
+    #     if boundary_weight.shape[-1] >= 3 and boundary_weight.shape[-2] >= 3:
+    #         boundary_weight = F.max_pool2d(
+    #             boundary_weight.unsqueeze(1), kernel_size=3, stride=1, padding=1
+    #         ).squeeze(1)
+
+    #     # If no boundary pixels, return zero loss
+    #     if boundary_weight.sum() < 1:
+    #         return pred_logits.sum() * 0.0
+
+    #     # Compute BCE only on boundary regions
+    #     # Ensure consistent dtype between pred and target
+    #     pred = torch.sigmoid(pred_logits.float())
+    #     tgt = tgt_masks.float()
+    #     bce = F.binary_cross_entropy(pred, tgt, reduction="none")
+
+    #     # Weight by boundary mask (boundary pixels contribute more)
+    #     # Also include some weight for interior to maintain stability
+    #     weight = 1.0 + 4.0 * boundary_weight  # 1x for interior, 5x for boundaries
+    #     weighted_bce = (bce * weight).sum() / (weight.sum() + eps)
+
+    #     return weighted_bce
 
     def loss_masks(self, outputs, targets, indices, num_boxes):
         """

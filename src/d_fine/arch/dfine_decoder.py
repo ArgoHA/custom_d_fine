@@ -340,15 +340,15 @@ class MaskDecoder(nn.Module):
         self.fusion_conv = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
         self.fusion_norm = nn.GroupNorm(n_groups, out_ch)
 
-        # upconvs (1/8 -> 1/4)
-        self.upconv1 = nn.ConvTranspose2d(out_ch, out_ch, kernel_size=2, stride=2, bias=False)
+        # Upsample 1/8 -> 1/4 using bilinear + conv (avoids checkerboard artifacts)
+        self.up_conv = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
         self.bn1 = nn.GroupNorm(n_groups, out_ch)
         self.act = nn.ReLU(inplace=True)
 
         self._reset_parameters()
 
     def _reset_parameters(self):
-        init.kaiming_normal_(self.upconv1.weight, mode="fan_out", nonlinearity="relu")
+        init.kaiming_normal_(self.up_conv.weight, mode="fan_out", nonlinearity="relu")
 
     def forward(self, feats):
         # feats: PAN features [F_s8, F_s16, F_s32] from HybridEncoder's outs
@@ -364,8 +364,9 @@ class MaskDecoder(nn.Module):
         # Smooth fused features
         x = self.act(self.fusion_norm(self.fusion_conv(x)))
 
-        # Upconv: 1/8 -> 1/4
-        x = self.act(self.bn1(self.upconv1(x)))
+        # Upsample: 1/8 -> 1/4 using bilinear interpolation + conv (smoother than ConvTranspose)
+        x = F.interpolate(x, scale_factor=2.0, mode="bilinear", align_corners=False)
+        x = self.act(self.bn1(self.up_conv(x)))
         return x  # (B, out_ch, H/4, W/4)
 
 

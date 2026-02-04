@@ -207,8 +207,12 @@ class HungarianMatcher(nn.Module):
 
                         tgt_m = t["masks"].float().to(pred_masks.device)  # [Nb, H, W]
                         if tgt_m.shape[-2:] != (Hm, Wm):
+                            # Use bilinear interpolation for smoother boundary matching
                             tgt_m = F.interpolate(
-                                tgt_m.unsqueeze(1), size=(Hm, Wm), mode="nearest"
+                                tgt_m.unsqueeze(1),
+                                size=(Hm, Wm),
+                                mode="bilinear",
+                                align_corners=False,
                             ).squeeze(1)
 
                         pred_m = pred_masks[b].sigmoid()  # [Q, Hm, Wm]
