@@ -387,7 +387,11 @@ class Trainer:
 
         model.eval()
         with torch.inference_mode():
-            for idx, (inputs, targets, img_paths) in enumerate(val_loader):
+            eval_iter = val_loader
+            if self.is_main:
+                eval_iter = tqdm(val_loader, desc="Evaluating", unit="batch", leave=False)
+
+            for idx, (inputs, targets, img_paths) in enumerate(eval_iter):
                 inputs = inputs.to(self.device)
                 if self.amp_enabled:
                     with autocast(str(self.device), cache_enabled=True):
@@ -451,15 +455,16 @@ class Trainer:
         # Only rank 0 computes metrics
         metrics = None
         if self.is_main and all_preds is not None and all_gt is not None:
-            validator = Validator(
-                all_gt,
-                all_preds,
-                conf_thresh=conf_thresh,
-                iou_thresh=iou_thresh,
-                label_to_name=self.label_to_name,
-                mask_batch_size=self.mask_batch_size,
-            )
-            metrics = validator.compute_metrics(extended=extended)
+            with tqdm(total=0, desc="Computing metrics...", bar_format="{desc}", leave=False):
+                validator = Validator(
+                    all_gt,
+                    all_preds,
+                    conf_thresh=conf_thresh,
+                    iou_thresh=iou_thresh,
+                    label_to_name=self.label_to_name,
+                    mask_batch_size=self.mask_batch_size,
+                )
+                metrics = validator.compute_metrics(extended=extended)
             if path_to_save:  # val and test
                 validator.save_plots(path_to_save / "plots" / mode)
 
