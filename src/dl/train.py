@@ -27,6 +27,7 @@ from src.d_fine.dist_utils import (
     get_rank,
     get_world_size,
     init_distributed_mode,
+    is_dist_available_and_initialized,
     is_main_process,
     synchronize,
 )
@@ -76,7 +77,12 @@ class Trainer:
     def __init__(self, cfg: DictConfig) -> None:
         self.cfg = cfg
 
-        self.distributed = hasattr(cfg.train, "ddp") and cfg.train.ddp.enabled
+        # Only consider distributed if config says DDP enabled AND process group was initialized
+        self.distributed = (
+            hasattr(cfg.train, "ddp")
+            and cfg.train.ddp.enabled
+            and is_dist_available_and_initialized()
+        )
         self.rank = get_rank()
         self.world_size = get_world_size()
         self.is_main = self.rank == 0

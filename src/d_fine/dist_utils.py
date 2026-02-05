@@ -1,4 +1,5 @@
 import os
+import warnings
 
 import numpy as np
 import torch
@@ -21,6 +22,11 @@ def init_distributed_mode() -> None:
     """
     if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
         # not running under torchrun
+        warnings.warn(
+            "DDP is enabled in config but RANK/WORLD_SIZE environment variables are not set. "
+            "Make sure to launch with torchrun, e.g.: "
+            "torchrun --nproc_per_node=8 src/dl/train.py"
+        )
         return
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))

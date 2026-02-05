@@ -212,7 +212,7 @@ class CustomDataset(Dataset):
                 cnts, _ = cv2.findContours(
                     mnp[k].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                 )
-                cv2.drawContours(image_np, cnts, -1, (0, 255, 0), 2)
+                cv2.drawContours(image_np, cnts, -1, (0, 255, 0), 1)
 
         # Draw bounding boxes and class IDs
         boxes_np = boxes.cpu().numpy().astype(int)

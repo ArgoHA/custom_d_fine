@@ -922,9 +922,16 @@ class LetterboxRect(DualTransform):
     def apply_to_mask(
         self, mask, new_w=0, new_h=0, pad_left=0, pad_top=0, pad_right=0, pad_bottom=0, **kwargs
     ):
-        # resize if needed - use INTER_NEAREST to preserve binary mask values
+        # resize if needed - use INTER_LINEAR for smooth edges, then re-threshold
+        # INTER_NEAREST causes ladder/wavy patterns on mask edges!
         if mask.shape[1] != new_w or mask.shape[0] != new_h:
-            mask = cv2.resize(mask, (int(new_w), int(new_h)), interpolation=cv2.INTER_NEAREST)
+            # Convert to float for bilinear interpolation
+            mask_float = mask.astype(np.float32)
+            mask_float = cv2.resize(
+                mask_float, (int(new_w), int(new_h)), interpolation=cv2.INTER_LINEAR
+            )
+            # Re-threshold to binary (0.5 threshold for anti-aliased edges)
+            mask = (mask_float > 0.5).astype(mask.dtype)
 
         # pad if needed - use 0 for masks (padding is not part of any object)
         if pad_top or pad_bottom or pad_left or pad_right:
@@ -1012,6 +1019,17 @@ def poly_abs_to_mask(poly_abs: np.ndarray, h: int, w: int) -> np.ndarray:
     m = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(m, [pts], 1)
     return m
+
+
+# def poly_abs_to_mask(poly_abs: np.ndarray, h: int, w: int, supersample: int = 4) -> np.ndarray:
+#     # Rasterize at higher resolution for anti-aliasing
+#     pts = poly_abs.copy() * supersample
+#     pts = np.round(pts).astype(np.int32)
+#     m = np.zeros((h * supersample, w * supersample), dtype=np.uint8)
+#     cv2.fillPoly(m, [pts], 1)
+#     # Downsample with area averaging for anti-aliased edges
+#     m = cv2.resize(m, (w, h), interpolation=cv2.INTER_AREA)
+#     return (m > 0.5).astype(np.uint8)
 
 
 # ============================================================================
