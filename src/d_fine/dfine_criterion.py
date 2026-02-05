@@ -269,6 +269,41 @@ class DFINECriterion(nn.Module):
 
         return torch.cat(tgt_masks_list, dim=0), valid_match_counts
 
+    def _prepare_target_boxes_for_masks(self, targets, indices, out_h, out_w, device):
+        """
+        Returns GT boxes in mask coordinate space [M, 4] (x1, y1, x2, y2) for cropped loss.
+        Boxes are in normalized cxcywh format in targets, converted to absolute xyxy in mask space.
+        """
+        boxes_list = []
+        for t, (_, J) in zip(targets, indices):
+            if "masks" not in t or t["masks"] is None or t["masks"].numel() == 0:
+                continue
+            m = t["masks"]
+            if m.dim() != 3:
+                continue
+            if J.numel() == 0:
+                continue
+            # Get matched boxes (normalized cxcywh)
+            b = t["boxes"][J]  # [Mi, 4]
+            # Convert to xyxy in mask coordinate space
+            cx, cy, w, h = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+            x1 = (cx - w / 2) * out_w
+            y1 = (cy - h / 2) * out_h
+            x2 = (cx + w / 2) * out_w
+            y2 = (cy + h / 2) * out_h
+            # Clamp to valid range
+            x1 = x1.clamp(0, out_w - 1)
+            y1 = y1.clamp(0, out_h - 1)
+            x2 = x2.clamp(1, out_w)
+            y2 = y2.clamp(1, out_h)
+            boxes = torch.stack([x1, y1, x2, y2], dim=1).to(device)  # [Mi, 4]
+            boxes_list.append(boxes)
+
+        if len(boxes_list) == 0:
+            return torch.zeros(0, 4, device=device, dtype=torch.float32)
+
+        return torch.cat(boxes_list, dim=0)
+
     @staticmethod
     def _focal_loss_mask(pred_sel, tgt_sel):
         # Focal BCE loss for masks with adaptive alpha based on foreground ratio
@@ -297,6 +332,60 @@ class DFINECriterion(nn.Module):
         return loss_mask_bce
 
     @staticmethod
+    def _cropped_bce_loss(pred_logits, tgt_masks, boxes, eps=1e-6):
+        """
+        YOLO-style cropped mask loss: compute BCE only inside GT box, normalize by box area.
+        This gives higher relative weight to boundaries and prevents the network from
+        being punished for garbage outside the object region.
+
+        pred_logits: [M, H, W] (logits)
+        tgt_masks  : [M, H, W] (0/1 or soft)
+        boxes      : [M, 4] (x1, y1, x2, y2) in mask coordinate space
+        returns scalar mean cropped BCE loss
+        """
+        if pred_logits.shape[0] == 0:
+            return pred_logits.sum() * 0.0
+
+        M, H, W = pred_logits.shape
+        device = pred_logits.device
+        dtype = pred_logits.dtype
+
+        # Create coordinate grids
+        ys = torch.arange(H, device=device, dtype=dtype)[None, :, None]  # (1, H, 1)
+        xs = torch.arange(W, device=device, dtype=dtype)[None, None, :]  # (1, 1, W)
+
+        # Extract box coordinates
+        x1, y1, x2, y2 = (
+            boxes[:, 0:1, None],
+            boxes[:, 1:2, None],
+            boxes[:, 2:3, None],
+            boxes[:, 3:4, None],
+        )
+
+        # Create inside-box mask with soft boundaries for smoother gradients
+        # Use sigmoid with temperature for differentiable crop (optional, can use hard if preferred)
+        inside_x = ((xs >= x1) & (xs < x2)).float()  # [M, 1, W]
+        inside_y = ((ys >= y1) & (ys < y2)).float()  # [M, H, 1]
+        inside = inside_x * inside_y  # [M, H, W]
+
+        # Compute BCE loss
+        bce = F.binary_cross_entropy_with_logits(pred_logits, tgt_masks, reduction="none")
+
+        # Apply crop mask
+        cropped_bce = bce * inside  # [M, H, W]
+
+        # Compute box area for normalization (in pixels)
+        box_w = (x2 - x1).squeeze(-1).squeeze(-1)  # [M]
+        box_h = (y2 - y1).squeeze(-1).squeeze(-1)  # [M]
+        box_area = (box_w * box_h).clamp(min=1.0)  # [M], avoid division by zero
+
+        # Sum loss over spatial dims and normalize by box area
+        loss_per_inst = cropped_bce.sum(dim=(1, 2)) / box_area  # [M]
+
+        # Mean over instances
+        return loss_per_inst.mean() if loss_per_inst.numel() > 0 else pred_logits.sum() * 0.0
+
+    @staticmethod
     def _dice_loss(pred_logits, tgt_masks, eps=1e-6):
         """
         pred_logits: [M, H, W] (logits)
@@ -309,6 +398,55 @@ class DFINECriterion(nn.Module):
         inter = (pred * tgt).sum(dim=1)
         denom = pred.sum(dim=1) + tgt.sum(dim=1) + eps
         dice = 1.0 - (2.0 * inter + eps) / denom
+        return dice.mean() if dice.numel() > 0 else pred_logits.sum() * 0.0
+
+    @staticmethod
+    def _cropped_dice_loss(pred_logits, tgt_masks, boxes, eps=1e-6):
+        """
+        YOLO-style cropped Dice loss: compute Dice only inside GT box.
+        This prevents the network from learning to suppress pixels far from the object.
+
+        pred_logits: [M, H, W] (logits)
+        tgt_masks  : [M, H, W] (0/1 or soft)
+        boxes      : [M, 4] (x1, y1, x2, y2) in mask coordinate space
+        returns scalar mean cropped Dice loss
+        """
+        if pred_logits.shape[0] == 0:
+            return pred_logits.sum() * 0.0
+
+        M, H, W = pred_logits.shape
+        device = pred_logits.device
+        dtype = pred_logits.dtype
+
+        # Create coordinate grids
+        ys = torch.arange(H, device=device, dtype=dtype)[None, :, None]
+        xs = torch.arange(W, device=device, dtype=dtype)[None, None, :]
+
+        # Extract box coordinates
+        x1, y1, x2, y2 = (
+            boxes[:, 0:1, None],
+            boxes[:, 1:2, None],
+            boxes[:, 2:3, None],
+            boxes[:, 3:4, None],
+        )
+
+        # Create inside-box mask
+        inside_x = ((xs >= x1) & (xs < x2)).float()
+        inside_y = ((ys >= y1) & (ys < y2)).float()
+        inside = inside_x * inside_y  # [M, H, W]
+
+        # Apply sigmoid and crop
+        pred = pred_logits.sigmoid() * inside  # [M, H, W]
+        tgt = tgt_masks * inside  # [M, H, W]
+
+        # Flatten and compute dice
+        pred = pred.flatten(1)  # [M, H*W]
+        tgt = tgt.flatten(1)
+
+        inter = (pred * tgt).sum(dim=1)
+        denom = pred.sum(dim=1) + tgt.sum(dim=1) + eps
+        dice = 1.0 - (2.0 * inter + eps) / denom
+
         return dice.mean() if dice.numel() > 0 else pred_logits.sum() * 0.0
 
     # @staticmethod
@@ -365,12 +503,16 @@ class DFINECriterion(nn.Module):
 
     def loss_masks(self, outputs, targets, indices, num_boxes):
         """
-        BCE and Dice loss for masks.
+        YOLO-style cropped BCE and Dice loss for masks.
+        Computes loss only inside GT boxes and normalizes by box area.
+        This gives higher relative weight to boundaries and prevents the network
+        from being punished for pixels outside the object region.
+
         input:
             outputs["pred_masks"]: [B, Q, Hm, Wm] (logits)
             targets[i]["masks"]: (Ni, H, W) per image (uint8/bool/float), per-instance
 
-        target mask downscaled to pred masks size, then compute loss.
+        target mask downscaled to pred masks size, then compute cropped loss.
         """
         if "pred_masks" not in outputs:
             return {}
@@ -395,6 +537,11 @@ class DFINECriterion(nn.Module):
             zero = pred_sel.sum() * 0
             return {"loss_mask_bce": zero, "loss_mask_dice": zero}
 
+        # Prepare GT boxes in mask coordinate space for cropped loss
+        tgt_boxes = self._prepare_target_boxes_for_masks(
+            targets, indices, Hm, Wm, device=pred_masks.device
+        )
+
         # If for robustness some matched pairs were skipped (no GT mask),
         if pred_sel.shape[0] != tgt_sel.shape[0]:
             raise AssertionError(
@@ -402,10 +549,10 @@ class DFINECriterion(nn.Module):
                 f"and target masks ({tgt_sel.shape[0]})"
             )
 
-        # Focal
-        loss_mask_bce = self._focal_loss_mask(pred_sel, tgt_sel)
-        # Dice
-        loss_mask_dice = self._dice_loss(pred_sel, tgt_sel)
+        # YOLO-style cropped BCE loss (loss computed only inside GT box, normalized by area)
+        loss_mask_bce = self._cropped_bce_loss(pred_sel, tgt_sel, tgt_boxes)
+        # YOLO-style cropped Dice loss
+        loss_mask_dice = self._cropped_dice_loss(pred_sel, tgt_sel, tgt_boxes)
         return {"loss_mask_bce": loss_mask_bce, "loss_mask_dice": loss_mask_dice}
 
     def _get_src_permutation_idx(self, indices):
