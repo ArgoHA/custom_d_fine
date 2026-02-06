@@ -125,10 +125,8 @@ def test_model(
                 "labels": model_preds[batch]["labels"].cpu(),
                 "scores": model_preds[batch]["scores"].cpu(),
             }
-            if "mask_probs" in model_preds[batch]:
-                pred_dict["masks"] = (
-                    (model_preds[batch]["mask_probs"] >= conf_thresh).to(torch.uint8).cpu()
-                )  # binarize
+            if "masks" in model_preds[batch]:
+                pred_dict["masks"] = model_preds[batch]["masks"].cpu()
 
             all_preds.append(pred_dict)
 

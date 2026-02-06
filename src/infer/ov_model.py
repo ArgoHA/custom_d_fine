@@ -20,6 +20,8 @@ class OV_model:
         half: bool = False,
         keep_ratio: bool = False,
         max_batch_size: int = 1,
+        binarize_masks: bool = True,
+        mask_threshold: float = 0.5,
         device: str = None,
     ):
         self.input_size = (input_height, input_width)
@@ -32,6 +34,8 @@ class OV_model:
         self.channels = 3
         self.max_batch_size = max_batch_size
         self.torch_device = "cpu"
+        self.binarize_masks = binarize_masks
+        self.mask_threshold = mask_threshold
 
         if isinstance(conf_thresh, float):
             self.conf_threshs = [conf_thresh] * self.n_outputs
@@ -260,9 +264,11 @@ class OV_model:
                     orig_sizes=orig_sizes_tensor,  # [1,2]
                     keep_ratio=self.keep_ratio,
                 )
-                out["mask_probs"] = masks_list[0]  # [K, H, W]
+                out["masks"] = masks_list[0]  # [K, H, W]
+                if self.binarize_masks:
+                    out["masks"] = (out["masks"] >= self.mask_threshold).to(torch.uint8)
                 # clean up masks outside of the corresponding bbox
-                out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
+                out["masks"] = cleanup_masks(out["masks"], out["boxes"])
 
             results.append(out)
 
@@ -471,7 +477,7 @@ if __name__ == "__main__":
         box = res[0]["boxes"][i].cpu().numpy().astype(int)
         score = res[0]["scores"][i].cpu().numpy()
         label = res[0]["labels"][i].cpu().numpy()
-        mask = res[0]["mask_probs"][i].cpu().numpy()
+        mask = res[0]["masks"][i].cpu().numpy()
         mask = (mask > 0.5).astype(np.uint8) * 255
 
         cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (255, 180, 100), 2)

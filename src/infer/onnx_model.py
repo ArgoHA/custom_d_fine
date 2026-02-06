@@ -18,6 +18,8 @@ class ONNX_model:
         rect: bool = False,
         half: bool = False,
         keep_ratio: bool = False,
+        binarize_masks: bool = True,
+        mask_threshold: float = 0.5,
         device: str | None = None,
     ):
         self.input_size = (input_height, input_width)
@@ -28,6 +30,8 @@ class ONNX_model:
         self.keep_ratio = keep_ratio
         self.channels = 3
         self.debug_mode = False
+        self.binarize_masks = binarize_masks
+        self.mask_threshold = mask_threshold
 
         # per-class confidence thresholds
         if isinstance(conf_thresh, float):
@@ -250,9 +254,11 @@ class ONNX_model:
                     orig_sizes=orig_sizes_tensor,  # [1,2]
                     keep_ratio=self.keep_ratio,
                 )
-                out["mask_probs"] = masks_list[0].to(dtype=torch.float32)  # [K, H, W]
+                out["masks"] = masks_list[0].to(dtype=torch.float32)  # [K, H, W]
+                if self.binarize_masks:
+                    out["masks"] = (out["masks"] >= self.mask_threshold).to(torch.uint8)
                 # clean up masks outside of the corresponding bbox
-                out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
+                out["masks"] = cleanup_masks(out["masks"], out["boxes"])
 
             results.append(out)
 
@@ -263,7 +269,7 @@ class ONNX_model:
         Args:
             inputs (HWC BGR np.uint8) or batch BHWC
         Returns:
-            list[dict] with keys: "labels", "boxes", "scores", "mask_probs" (all torch.Tensor)
+            list[dict] with keys: "labels", "boxes", "scores", "masks" (all torch.Tensor)
         """
         proc, proc_sz, orig_sz = self._prepare_inputs(inputs)
         preds = self._predict(proc)

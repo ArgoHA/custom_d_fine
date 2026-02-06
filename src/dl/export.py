@@ -187,7 +187,7 @@ def main(cfg: DictConfig):
     output_names = ["logits", "boxes"]
     enable_mask_head = cfg.task == "segment"
     if enable_mask_head:
-        output_names.append("mask_probs")
+        output_names.append("masks")
 
     device = cfg.train.device
     cfg.exp = get_latest_experiment_name(cfg.exp, cfg.train.path_to_save)

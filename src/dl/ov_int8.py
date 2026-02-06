@@ -75,9 +75,9 @@ def main(cfg: DictConfig):
         output_masks = None
         if enable_mask_head:
             try:
-                output_masks = compiled_model.output("mask_probs")
+                output_masks = compiled_model.output("masks")
             except RuntimeError:
-                logger.warning("mask_probs output not found in model, disabling mask head")
+                logger.warning("masks output not found in model, disabling mask head")
 
         all_preds: List[Dict[str, torch.Tensor]] = []
         all_gt: List[Dict[str, torch.Tensor]] = []
@@ -130,7 +130,8 @@ def main(cfg: DictConfig):
         )
         metrics = validator.compute_metrics(extended=False)
         f1_score = metrics["f1"]
-        logger.info(f"Validation F1-score: {f1_score:.4f}")
+        if len(all_gt) > 1:
+            logger.info(f"Validation F1-score: {f1_score:.4f}")
         return f1_score
 
     # Run quantization with accuracy control

@@ -42,7 +42,7 @@ class YOLO_TRT_model:
                 "boxes": torch.zeros((0, 4), dtype=torch.float32),
                 "scores": torch.zeros((0,), dtype=torch.float32),
                 "labels": torch.zeros((0,), dtype=torch.int64),
-                "mask_probs": torch.zeros((0, h, w), dtype=torch.float32),
+                "masks": torch.zeros((0, h, w), dtype=torch.float32),
             }
         else:
             out = {
@@ -51,7 +51,7 @@ class YOLO_TRT_model:
                 "labels": result.boxes.cls.to(torch.int64),
             }
             if result.masks is not None:
-                out["mask_probs"] = result.masks.data.to(torch.float32)
+                out["masks"] = result.masks.data.to(torch.float32)
 
         if return_raw_latency:
             return [out], inference_time_ms

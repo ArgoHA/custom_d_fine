@@ -24,6 +24,8 @@ class Torch_model:
         keep_ratio: bool = False,
         use_nms: bool = False,
         enable_mask_head: bool = False,
+        binarize_masks: bool = True,
+        mask_threshold: float = 0.5,
         device: str = None,
     ):
         self.input_size = (input_height, input_width)
@@ -37,6 +39,8 @@ class Torch_model:
         self.enable_mask_head = enable_mask_head
         self.channels = 3
         self.debug_mode = False
+        self.binarize_masks = binarize_masks
+        self.mask_threshold = mask_threshold
 
         if isinstance(conf_thresh, float):
             self.conf_threshs = [conf_thresh] * self.n_outputs
@@ -212,9 +216,11 @@ class Torch_model:
                     orig_sizes=orig_sizes_tensor,  # [1,2]
                     keep_ratio=self.keep_ratio,
                 )
-                out["mask_probs"] = masks_list[0]  # [K, H, W]
+                out["masks"] = masks_list[0]  # [K, H, W]
+                if self.binarize_masks:
+                    out["masks"] = (out["masks"] >= self.mask_threshold).to(torch.uint8)
                 # clean up masks outside of the corresponding bbox
-                out["mask_probs"] = cleanup_masks(out["mask_probs"], out["boxes"])
+                out["masks"] = cleanup_masks(out["masks"], out["boxes"])
 
             results.append(out)
 
@@ -308,14 +314,14 @@ class Torch_model:
                     res["boxes"],
                     res["scores"],
                     res["labels"],
-                    masks=res.get("mask_probs", None),
+                    masks=res.get("masks", None),
                     iou_threshold=0.5,
                 )
                 output[idx]["boxes"] = boxes
                 output[idx]["scores"] = scores
                 output[idx]["labels"] = classes
-                if "mask_probs" in res:
-                    output[idx]["mask_probs"] = masks
+                if "masks" in res:
+                    output[idx]["masks"] = masks
         return output
 
     @torch.no_grad()
@@ -327,7 +333,7 @@ class Torch_model:
             labels: torch.Tensor of shape (N,), dtype int64
             boxes: torch.Tensor of shape (N, 4), dtype float32, abs values
             scores: torch.Tensor of shape (N,), dtype float32
-            mask_probs: torch.Tensor of shape (N, H, W), dtype float32. N = number of objects
+            masks: torch.Tensor of shape (N, H, W), dtype float32. N = number of objects
         """
         processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(inputs)
         preds = self._predict(processed_inputs)

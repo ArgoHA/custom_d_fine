@@ -101,9 +101,8 @@ def run_images(
             "labels": raw_res[batch]["labels"].cpu().numpy(),
             "scores": raw_res[batch]["scores"].cpu().numpy(),
         }
-        if "mask_probs" in raw_res[0]:
-            mask_probs = raw_res[batch]["mask_probs"].cpu()
-            res["masks"] = (mask_probs >= conf_thresh).to(torch.uint8).numpy()
+        if "masks" in raw_res[0]:
+            res["masks"] = raw_res[batch]["masks"].cpu()
             res["polys"] = torch_model.mask2poly(res["masks"], img.shape)
 
         visualize(
@@ -152,9 +151,8 @@ def run_videos(
                 "labels": raw_res[batch]["labels"].cpu().numpy(),
                 "scores": raw_res[batch]["scores"].cpu().numpy(),
             }
-            if "mask_probs" in raw_res[0]:
-                mask_probs = raw_res[batch]["mask_probs"].cpu()
-                res["masks"] = (mask_probs >= conf_thresh).to(torch.uint8).numpy()
+            if "masks" in raw_res[0]:
+                res["masks"] = raw_res[batch]["masks"].cpu()
                 res["polys"] = torch_model.mask2poly(res["masks"], img.shape)
 
             frame_name = f"{Path(vid_path).stem}_frame_{idx}"
