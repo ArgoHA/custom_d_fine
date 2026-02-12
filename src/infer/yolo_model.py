@@ -6,7 +6,7 @@ from numpy.typing import NDArray
 from ultralytics import YOLO
 
 
-class YOLO_TRT_model:
+class YOLO_model:
     def __init__(
         self,
         model_path: str,
