@@ -1,14 +1,9 @@
-.PHONY: full train preprocess split export bench infer test_batching check_errors ov_int8
+.PHONY: main train split export bench infer test_batching check_errors ov_int8
 
-full:
-	python -m src.etl.preprocess
-	python -m src.etl.split
+main:
 	@$(MAKE) train
 	python -m src.dl.export
 	python -m src.dl.bench
-
-preprocess:
-	python -m src.etl.preprocess
 
 split:
 	python -m src.etl.split

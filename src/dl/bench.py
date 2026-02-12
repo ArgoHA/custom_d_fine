@@ -184,8 +184,6 @@ def main(cfg: DictConfig):
     trt_model = TRT_model(
         model_path=Path(cfg.train.path_to_save) / "model.engine",
         n_outputs=len(cfg.train.label_to_name),
-        input_width=cfg.train.img_size[1],
-        input_height=cfg.train.img_size[0],
         conf_thresh=conf_thresh,
         rect=False,
         half=cfg.export.half,
@@ -194,9 +192,6 @@ def main(cfg: DictConfig):
 
     ov_model = OV_model(
         model_path=Path(cfg.train.path_to_save) / "model.xml",
-        n_outputs=len(cfg.train.label_to_name),
-        input_width=cfg.train.img_size[1],
-        input_height=cfg.train.img_size[0],
         conf_thresh=conf_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
@@ -207,8 +202,6 @@ def main(cfg: DictConfig):
     onnx_model = ONNX_model(
         model_path=Path(cfg.train.path_to_save) / "model.onnx",
         n_outputs=len(cfg.train.label_to_name),
-        input_width=cfg.train.img_size[1],
-        input_height=cfg.train.img_size[0],
         conf_thresh=conf_thresh,
         rect=False,
         half=False,
@@ -219,9 +212,6 @@ def main(cfg: DictConfig):
     if ov_int8_path.exists():
         ov_int8_model = OV_model(
             model_path=ov_int8_path,
-            n_outputs=len(cfg.train.label_to_name),
-            input_width=cfg.train.img_size[1],
-            input_height=cfg.train.img_size[0],
             conf_thresh=conf_thresh,
             rect=cfg.export.dynamic_input,
             half=cfg.export.half,

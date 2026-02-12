@@ -6,13 +6,113 @@ import onnxsim
 import openvino as ov
 import tensorrt as trt
 import torch
+import torch.nn.functional as F
 from loguru import logger
 from omegaconf import DictConfig
 from onnxconverter_common import float16
 from torch import nn
 
+from src.d_fine.configs import base_cfg
 from src.d_fine.dfine import build_model
 from src.dl.utils import get_latest_experiment_name
+
+
+class DFINEPostProcessor(nn.Module):
+    """Fused detection postprocessor baked into the exported graph.
+
+    Performs: sigmoid -> topK -> cxcywh -> xyxy (in input-size pixels).
+    Outputs: labels [B,K], boxes [B,K,4], scores [B,K].
+    Masks (if present) are passed through with sigmoid applied.
+    """
+
+    def __init__(self, num_classes: int, num_top_queries: int = 300, use_focal_loss: bool = True):
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_top_queries = num_top_queries
+        self.use_focal_loss = use_focal_loss
+
+    @staticmethod
+    def norm_xywh_to_abs_xyxy(
+        boxes: torch.Tensor, height: int, width: int, to_round=True
+    ) -> torch.Tensor:
+        """Converts boxes: [N, 4] normalized xywh -> [N, 4] absolute xyxy"""
+        x_center = boxes[:, 0] * width
+        y_center = boxes[:, 1] * height
+        box_width = boxes[:, 2] * width
+        box_height = boxes[:, 3] * height
+
+        x_min = x_center - (box_width / 2)
+        y_min = y_center - (box_height / 2)
+        x_max = x_center + (box_width / 2)
+        y_max = y_center + (box_height / 2)
+
+        if to_round:
+            x_min = torch.clamp(torch.floor(x_min), min=1)
+            y_min = torch.clamp(torch.floor(y_min), min=1)
+            x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
+            y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
+        else:
+            x_min = torch.clamp(x_min, min=0)
+            y_min = torch.clamp(y_min, min=0)
+            x_max = torch.clamp(x_max, max=width)
+            y_max = torch.clamp(y_max, max=height)
+        return torch.stack([x_min, y_min, x_max, y_max], dim=1)
+
+    def forward(self, outputs: dict, input_h: int, input_w: int):
+        logits = outputs["pred_logits"]  # [B, Q, C]
+        boxes = outputs["pred_boxes"]  # [B, Q, 4]  normalised cxcywh
+        pred_masks = outputs.get("pred_masks", None)  # [B, Q, Hm, Wm] or None
+
+        # box conversion: normalised cxcywh -> absolute xyxy in input-size space
+        abs_boxes = self.norm_xywh_to_abs_xyxy(boxes.flatten(0, 1), input_h, input_w).view(
+            boxes.shape[0], boxes.shape[1], 4
+        )
+
+        # score extraction & topK
+        if self.use_focal_loss:
+            scores_all = torch.sigmoid(logits)  # [B, Q, C]
+            flat = scores_all.flatten(1)  # [B, Q*C]
+            K = min(self.num_top_queries, flat.shape[1])
+            topk_scores, topk_idx = torch.topk(flat, K, dim=-1)  # [B, K]
+            topk_labels = topk_idx % self.num_classes  # [B, K]
+            topk_qidx = topk_idx // self.num_classes  # [B, K]
+        else:
+            probs = F.softmax(logits, dim=-1)[:, :, :-1]  # [B, Q, C-1]
+            topk_scores, topk_labels = probs.max(dim=-1)  # [B, Q]
+            K = min(self.num_top_queries, topk_scores.shape[1])
+            topk_scores, order = torch.topk(topk_scores, K, dim=-1)
+            topk_labels = topk_labels.gather(1, order)
+            topk_qidx = order
+
+        # gather boxes for top-K queries
+        topk_boxes = abs_boxes.gather(1, topk_qidx.unsqueeze(-1).expand(-1, -1, 4))  # [B, K, 4]
+
+        result = (topk_labels, topk_boxes, topk_scores)
+
+        if pred_masks is not None:
+            # Gather masks for top-K queries: [B, Q, Hm, Wm] -> [B, K, Hm, Wm]
+            Hm, Wm = pred_masks.shape[2], pred_masks.shape[3]
+            topk_masks = pred_masks.gather(
+                1, topk_qidx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, Hm, Wm)
+            )
+            result = result + (topk_masks,)
+
+        return result
+
+
+class ExportWrapper(nn.Module):
+    """Wraps backbone model + postprocessor for ONNX/TRT export."""
+
+    def __init__(self, model: nn.Module, postprocessor: DFINEPostProcessor, input_size):
+        super().__init__()
+        self.model = model
+        self.postprocessor = postprocessor
+        self.input_h = input_size[0]
+        self.input_w = input_size[1]
+
+    def forward(self, x):
+        outputs = self.model(x)
+        return self.postprocessor(outputs, self.input_h, self.input_w)
 
 
 def prepare_model(cfg, device):
@@ -37,17 +137,11 @@ def export_to_onnx(
     dynamic_input: bool,
     input_name: str,
     output_names: list[str],
-    enable_mask_head: bool,
 ) -> None:
     dynamic_axes = {}
     if max_batch_size > 1:
-        dynamic_axes = {
-            input_name: {0: "batch_size"},
-            output_names[0]: {0: "batch_size"},
-            output_names[1]: {0: "batch_size"},
-        }
-    if enable_mask_head:
-        dynamic_axes[output_names[2]] = {0: "batch_size"}
+        for name in [input_name] + output_names:
+            dynamic_axes[name] = {0: "batch_size"}
     if dynamic_input:
         if input_name not in dynamic_axes:
             dynamic_axes[input_name] = {}
@@ -184,7 +278,7 @@ def export_to_tensorrt(
 @hydra.main(version_base=None, config_path="../../", config_name="config")
 def main(cfg: DictConfig):
     input_name = "input"
-    output_names = ["logits", "boxes"]
+    output_names = ["labels", "boxes", "scores"]
     enable_mask_head = cfg.task == "segment"
     if enable_mask_head:
         output_names.append("masks")
@@ -194,11 +288,38 @@ def main(cfg: DictConfig):
 
     model_path = Path(cfg.train.path_to_save) / "model.pt"
 
-    model = prepare_model(cfg, device)
+    raw_model = prepare_model(cfg, device)
+
+    # Wrap model with fused postprocessor
+    postprocessor = DFINEPostProcessor(
+        num_classes=len(cfg.train.label_to_name),
+        num_top_queries=base_cfg["DFINETransformer"]["num_queries"],
+        use_focal_loss=base_cfg["matcher"]["use_focal_loss"],
+    )
+    model = ExportWrapper(raw_model, postprocessor, input_size=cfg.train.img_size)
+    model.eval()
+    raw_model.eval()
+
     x_test = torch.randn(cfg.export.max_batch_size, 3, *cfg.train.img_size).to(device)
     _ = model(x_test)
 
-    onnx_path = export_to_onnx(
+    # Openvino currently doesn't supprort some operations in postprocessor
+    raw_output_names = ["logits", "boxes"]
+    if enable_mask_head:
+        raw_output_names.append("masks")
+    raw_onnx_path = export_to_onnx(
+        raw_model,
+        model_path,
+        x_test,
+        cfg.export.max_batch_size,
+        half=False,
+        dynamic_input=False,
+        input_name=input_name,
+        output_names=raw_output_names,
+    )
+    export_to_openvino(raw_onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
+
+    full_onnx_path = export_to_onnx(
         model,
         model_path,
         x_test,
@@ -207,12 +328,8 @@ def main(cfg: DictConfig):
         dynamic_input=False,
         input_name=input_name,
         output_names=output_names,
-        enable_mask_head=enable_mask_head,
     )
-
-    export_to_openvino(onnx_path, x_test, cfg.export.dynamic_input, max_batch_size=1)
-
-    export_to_tensorrt(onnx_path, cfg.export.half, cfg.export.max_batch_size)
+    export_to_tensorrt(full_onnx_path, cfg.export.half, cfg.export.max_batch_size)
 
     logger.info(f"Exports saved to: {model_path.parent}")
 

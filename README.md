@@ -56,7 +56,7 @@ python -m src.dl.train exp_name=my_experiment
 python -m src.dl.export exp_name=my_experiment
 ```
 
-For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and run `make train` as usual. 
+For **DDP training** just set train.ddp.enabled to True, pick number of GPUs and run `make train` as usual.
 
 ## Labels format
 
@@ -94,6 +94,8 @@ Use inference classes in `src/infer`. Currently available:
 - ONNX
 
 You can run inference on a folder (path_to_test_data) of images or on a folder of videos. Crops will be created automatically. You can control it and paddings from config.yaml in the `infer` section.
+
+Detection postprocessing is fuzed into the model graph for TensorRT during the export.
 
 ## Performace benchmarks
 

@@ -1,3 +1,4 @@
+import time
 from typing import Dict, List, Tuple
 
 import cv2
@@ -12,39 +13,38 @@ class TRT_model:
         self,
         model_path: str,
         n_outputs: int,
-        input_width: int = 640,
-        input_height: int = 640,
-        conf_thresh: float = 0.5,
-        rect: bool = False,  # No need for rectangular inference with fixed size
-        half: bool = False,
-        keep_ratio: bool = False,
+        conf_thresh: float | List[float] = 0.5,
         binarize_masks: bool = True,
         mask_threshold: float = 0.5,
+        rect: bool = False,
+        half: bool = False,
+        keep_ratio: bool = False,
         device: str = None,
     ) -> None:
-        self.input_size = (input_height, input_width)
-        self.n_outputs = n_outputs
         self.model_path = model_path
+        self.n_outputs = n_outputs
         self.rect = rect
         self.half = half
         self.keep_ratio = keep_ratio
         self.channels = 3
         self.binarize_masks = binarize_masks
         self.mask_threshold = mask_threshold
-
-        if isinstance(conf_thresh, float):
-            self.conf_threshs = [conf_thresh] * self.n_outputs
-        elif isinstance(conf_thresh, list):
-            self.conf_threshs = conf_thresh
+        self.np_dtype = np.float32
 
         if not device:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
 
-        self.np_dtype = np.float32
-
         self._load_model()
+        self._read_engine_metadata()
+
+        # Per-class confidence thresholds
+        if isinstance(conf_thresh, float):
+            self.conf_threshs = [conf_thresh] * self.n_outputs
+        elif isinstance(conf_thresh, list):
+            self.conf_threshs = conf_thresh
+
         self._test_pred()
 
     def _load_model(self):
@@ -52,6 +52,19 @@ class TRT_model:
         with open(self.model_path, "rb") as f, trt.Runtime(self.TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
         self.context = self.engine.create_execution_context()
+
+    def _read_engine_metadata(self):
+        """Auto-read input_size and detect mask presence from the engine."""
+        inp_name = self.engine.get_tensor_name(0)
+        inp_shape = tuple(self.engine.get_tensor_shape(inp_name))
+        self.input_size = (inp_shape[2], inp_shape[3])  # (H, W)
+
+        n_outputs = 0
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
+                n_outputs += 1
+        self.has_masks = n_outputs > 3
 
     @staticmethod
     def _torch_dtype_from_trt(trt_dtype):
@@ -61,6 +74,8 @@ class TRT_model:
             return torch.float16
         elif trt_dtype == trt.int32:
             return torch.int32
+        elif trt_dtype == trt.int64:
+            return torch.int64
         elif trt_dtype == trt.int8:
             return torch.int8
         else:
@@ -73,21 +88,15 @@ class TRT_model:
         self._postprocess(preds, processed_sizes, original_sizes)
 
     @staticmethod
-    def process_boxes(boxes, processed_sizes, orig_sizes, keep_ratio):
-        final_boxes = torch.zeros_like(boxes, device=boxes.device)
-        for idx in range(boxes.shape[0]):
-            final_boxes[idx] = norm_xywh_to_abs_xyxy(
-                boxes[idx], processed_sizes[idx][0], processed_sizes[idx][1]
-            )
-
-        for i in range(len(orig_sizes)):
+    def rescale_boxes(boxes, processed_sizes, orig_sizes, keep_ratio):
+        """Rescale absolute xyxy boxes from input-size space to original image size."""
+        out = boxes.clone()
+        for i in range(boxes.shape[0]):
             if keep_ratio:
-                final_boxes[i] = scale_boxes_ratio_kept(
-                    final_boxes[i], processed_sizes[i], orig_sizes[i]
-                )
+                out[i] = scale_boxes_ratio_kept(out[i], processed_sizes[i], orig_sizes[i])
             else:
-                final_boxes[i] = scale_boxes(final_boxes[i], orig_sizes[i], processed_sizes[i])
-        return final_boxes
+                out[i] = scale_boxes(out[i], orig_sizes[i], processed_sizes[i])
+        return out
 
     @staticmethod
     def process_masks(
@@ -139,15 +148,10 @@ class TRT_model:
         return out
 
     def _compute_nearest_size(self, shape, target_size, stride=32) -> Tuple[int, int]:
-        """
-        Get nearest size that is divisible by 32
-        """
+        """Get nearest size that is divisible by 32"""
         scale = target_size / max(shape)
         new_shape = [int(round(dim * scale)) for dim in shape]
-
-        # Make sure new dimensions are divisible by the stride
-        new_shape = [max(stride, int(np.ceil(dim / stride) * stride)) for dim in new_shape]
-        return new_shape
+        return [max(stride, int(np.ceil(dim / stride) * stride)) for dim in new_shape]
 
     def _preprocess(self, img: NDArray, stride: int = 32) -> NDArray:
         """
@@ -233,71 +237,44 @@ class TRT_model:
 
         # 4) run inference
         self.context.execute_v2(bindings)
-
-        # 5) return all output tensors
         return outputs
 
     def _postprocess(
         self,
-        outputs: torch.Tensor,
+        outputs: List[torch.Tensor],
         processed_sizes: List[Tuple[int, int]],
         original_sizes: List[Tuple[int, int]],
-        num_top_queries=300,
-        use_focal_loss=True,
     ) -> List[Dict[str, NDArray]]:
         """
         returns List with BS length. Each element is a dict {"labels", "boxes", "scores"}
         """
-        logits, boxes = outputs[0], outputs[1]
-        has_masks = len(outputs) > 2 and outputs[2] is not None
-        pred_masks = outputs[2] if has_masks else None  # [B,Q,Hm,Wm]
-        B, Q = logits.shape[:2]
+        labels = outputs[0]  # [B, K]
+        boxes = outputs[1]  # [B, K, 4], absolute xyxy in input_size space
+        scores = outputs[2]  # [B, K]
+        pred_masks = outputs[3] if self.has_masks else None  # [B, K, Hm, Wm]
+        B = labels.shape[0]
 
-        boxes = self.process_boxes(
-            boxes, processed_sizes, original_sizes, self.keep_ratio
-        )  # B x TopQ x 4
-
-        # scores/labels and preliminary topK over all Q*C
-        if use_focal_loss:
-            scores_all = torch.sigmoid(logits)  # [B,Q,C]
-            flat = scores_all.flatten(1)  # [B, Q*C]
-            # pre-topk to avoid scanning all queries later
-            K = min(num_top_queries, flat.shape[1])
-            topk_scores, topk_idx = torch.topk(flat, K, dim=-1)  # [B,K]
-            topk_labels = topk_idx - (topk_idx // self.n_outputs) * self.n_outputs  # [B,K]
-            topk_qidx = topk_idx // self.n_outputs  # [B,K]
-        else:
-            probs = torch.softmax(logits, dim=-1)[:, :, :-1]  # [B,Q,C-1]
-            topk_scores, topk_labels = probs.max(dim=-1)  # [B,Q]
-            # keep at most K queries per image by score
-            K = min(num_top_queries, Q)
-            topk_scores, order = torch.topk(topk_scores, K, dim=-1)  # [B,K]
-            topk_labels = topk_labels.gather(1, order)  # [B,K]
-            topk_qidx = order
+        boxes = self.rescale_boxes(boxes, processed_sizes, original_sizes, self.keep_ratio)
 
         results = []
         for b in range(B):
-            sb = topk_scores[b]
-            lb = topk_labels[b]
-            qb = topk_qidx[b]
+            sb, lb, bb = scores[b], labels[b], boxes[b]
             # Apply per-class confidence thresholds
-            conf_threshs_tensor = torch.tensor(self.conf_threshs, device=sb.device)
-            keep = sb >= conf_threshs_tensor[lb]
-
-            sb = sb[keep]
-            lb = lb[keep]
-            qb = qb[keep]
-            # gather boxes once
-            bb = boxes[b].gather(0, qb.unsqueeze(-1).repeat(1, 4))
+            if self.conf_threshs is not None:
+                conf_t = torch.tensor(self.conf_threshs, device=sb.device)
+                keep = sb >= conf_t[lb]
+            else:
+                keep = sb >= self.conf_thresh
+            sb, lb, bb = sb[keep], lb[keep], bb[keep]
 
             out = {"labels": lb, "boxes": bb, "scores": sb}
-            if has_masks and qb.numel() > 0:
-                # gather only kept masks
-                mb = pred_masks[b, qb]  # [K', Hm, Wm] logits or probs
+
+            if pred_masks is not None and lb.numel() > 0:
+                mb = pred_masks[b][keep]  # [K, Hm, Wm] — already gathered for top-K
                 # resize to original size (list of length 1)
                 orig_sizes_tensor = torch.tensor([original_sizes[b]], device=mb.device)
                 masks_list = self.process_masks(
-                    mb.unsqueeze(0),  # [1,K',Hm,Wm]
+                    mb.unsqueeze(0),
                     processed_size=processed_sizes[b],  # (Hin, Win)
                     orig_sizes=orig_sizes_tensor,  # [1,2]
                     keep_ratio=self.keep_ratio,
@@ -446,33 +423,6 @@ def scale_boxes(boxes, orig_shape, resized_shape):
     boxes[:, 1] *= scale_y
     boxes[:, 3] *= scale_y
     return boxes
-
-
-def norm_xywh_to_abs_xyxy(
-    boxes: torch.Tensor, height: int, width: int, to_round=True
-) -> torch.Tensor:
-    """Converts boxes: [N, 4] normalized xywh -> [N, 4] absolute xyxy"""
-    x_center = boxes[:, 0] * width
-    y_center = boxes[:, 1] * height
-    box_width = boxes[:, 2] * width
-    box_height = boxes[:, 3] * height
-
-    x_min = x_center - (box_width / 2)
-    y_min = y_center - (box_height / 2)
-    x_max = x_center + (box_width / 2)
-    y_max = y_center + (box_height / 2)
-
-    if to_round:
-        x_min = torch.clamp(torch.floor(x_min), min=1)
-        y_min = torch.clamp(torch.floor(y_min), min=1)
-        x_max = torch.clamp(torch.ceil(x_max), max=width - 1)
-        y_max = torch.clamp(torch.ceil(y_max), max=height - 1)
-    else:
-        x_min = torch.clamp(x_min, min=0)
-        y_min = torch.clamp(y_min, min=0)
-        x_max = torch.clamp(x_max, max=width)
-        y_max = torch.clamp(y_max, max=height)
-    return torch.stack([x_min, y_min, x_max, y_max], dim=1)
 
 
 def cleanup_masks(masks: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:

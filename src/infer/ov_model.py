@@ -12,20 +12,15 @@ class OV_model:
     def __init__(
         self,
         model_path: str,
-        n_outputs: int,
-        input_width: int = 640,
-        input_height: int = 640,
-        conf_thresh: float = 0.5,
-        rect: bool = False,  # cuts paddings, inference is faster, accuracy might be lower
+        conf_thresh: float | List[float] = 0.5,
+        binarize_masks: bool = True,
+        mask_threshold: float = 0.5,
+        rect: bool = False,
         half: bool = False,
         keep_ratio: bool = False,
         max_batch_size: int = 1,
-        binarize_masks: bool = True,
-        mask_threshold: float = 0.5,
         device: str = None,
     ):
-        self.input_size = (input_height, input_width)
-        self.n_outputs = n_outputs
         self.model_path = model_path
         self.device = device.upper() if device else device
         self.rect = rect
@@ -36,15 +31,17 @@ class OV_model:
         self.torch_device = "cpu"
         self.binarize_masks = binarize_masks
         self.mask_threshold = mask_threshold
+        self.np_dtype = np.float32
 
+        self._load_model()
+        self._read_model_metadata()
+
+        # Per-class confidence thresholds
         if isinstance(conf_thresh, float):
             self.conf_threshs = [conf_thresh] * self.n_outputs
         elif isinstance(conf_thresh, list):
             self.conf_threshs = conf_thresh
 
-        self.np_dtype = np.float32
-
-        self._load_model()
         self._test_pred()
 
     def _load_model(self):
@@ -55,6 +52,10 @@ class OV_model:
             self.device = "CPU"
             if "GPU" in core.get_available_devices() and not self.rect:
                 self.device = "GPU"
+
+        # Read input_size
+        inp_shape = det_ov_model.inputs[0].shape  # [1, 3, H, W]
+        self.input_size = (inp_shape[2], inp_shape[3])  # (H, W)
 
         if self.device != "CPU":
             det_ov_model.reshape({"input": [1, 3, *self.input_size]})
@@ -67,6 +68,11 @@ class OV_model:
             config={"PERFORMANCE_HINT": inference_mode, "INFERENCE_PRECISION_HINT": inference_hint},
         )
         logger.info(f"OpenVino running on {self.device}")
+
+    def _read_model_metadata(self):
+        """Detect mask presence and num classes from the compiled model."""
+        self.has_masks = len(self.model.outputs) > 2  # logits, boxes, [masks]
+        self.n_outputs = self.model.outputs[0].shape[2]  # logits shape: [B, Q, C]
 
     def _test_pred(self):
         random_image = np.random.randint(0, 255, size=(1000, 1110, self.channels), dtype=np.uint8)
@@ -135,20 +141,13 @@ class OV_model:
             ).squeeze(0)  # [Q, H0, W0]
             out.append(m.clamp_(0, 1))
 
-        if single:
-            return [out[0]]
-        return out
+        return [out[0]] if single else out
 
     def _compute_nearest_size(self, shape, target_size, stride=32) -> Tuple[int, int]:
-        """
-        Get nearest size that is divisible by 32
-        """
+        """Get nearest size that is divisible by 32"""
         scale = target_size / max(shape)
         new_shape = [int(round(dim * scale)) for dim in shape]
-
-        # Make sure new dimensions are divisible by the stride
-        new_shape = [max(stride, int(np.ceil(dim / stride) * stride)) for dim in new_shape]
-        return new_shape
+        return [max(stride, int(np.ceil(dim / stride) * stride)) for dim in new_shape]
 
     def _preprocess(self, img: NDArray, stride: int = 32) -> torch.tensor:
         if not self.keep_ratio:  # simple resize
@@ -193,12 +192,11 @@ class OV_model:
         return processed_inputs, processed_sizes, original_sizes
 
     def _predict(self, img: NDArray) -> List[NDArray]:
-        outputs = list(self.model(img).values())
-        return outputs
+        return list(self.model(img).values())
 
     def _postprocess(
         self,
-        outputs: torch.Tensor,
+        outputs: List[NDArray],
         processed_sizes: List[Tuple[int, int]],
         original_sizes: List[Tuple[int, int]],
         num_top_queries=300,
@@ -271,7 +269,6 @@ class OV_model:
                 out["masks"] = cleanup_masks(out["masks"], out["boxes"])
 
             results.append(out)
-
         return results
 
     def __call__(self, inputs: NDArray[np.uint8]) -> List[Dict[str, torch.Tensor]]:
@@ -282,7 +279,7 @@ class OV_model:
             labels: torch.Tensor of shape (N,), dtype int64
             boxes: torch.Tensor of shape (N, 4), dtype float32, abs values
             scores: torch.Tensor of shape (N,), dtype float32
-            masks: np.ndarray of shape (N, H, W), dtype np.uint8. N = number of objects
+            masks: torch.Tensor of shape (N, H, W), dtype float32. N = number of objects
         """
         processed_inputs, processed_sizes, original_sizes = self._prepare_inputs(inputs)
         preds = self._predict(processed_inputs)
@@ -461,18 +458,13 @@ def cleanup_masks(masks: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
 if __name__ == "__main__":
     model = OV_model(
         model_path="model.xml",
-        n_outputs=1,
-        input_height=640,
-        input_width=640,
         conf_thresh=0.5,
         half=False,
     )
 
     img = cv2.imread("test_image.jpg")
-
     res = model(img)
 
-    # write a functioun to visualize the model outout (masks)
     for i in range(len(res[0]["boxes"])):
         box = res[0]["boxes"][i].cpu().numpy().astype(int)
         score = res[0]["scores"][i].cpu().numpy()
@@ -491,14 +483,12 @@ if __name__ == "__main__":
             2,
         )
 
-        # apply blueish colored mask
         colored_mask = np.zeros_like(img)
-        colored_mask[:, :, 0] = mask  # Blue channel (full)
-        colored_mask[:, :, 1] = mask * 120 // 255  # Green channel
-        colored_mask[:, :, 2] = mask * 60 // 255  # Red channel
+        colored_mask[:, :, 0] = mask
+        colored_mask[:, :, 1] = mask * 120 // 255
+        colored_mask[:, :, 2] = mask * 60 // 255
         img = cv2.addWeighted(img, 1.0, colored_mask, 0.2, 0)
 
-        # draw solid mask contours/edges
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(img, contours, -1, (255, 180, 100), 2)
 
