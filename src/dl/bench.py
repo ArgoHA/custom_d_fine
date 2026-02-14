@@ -160,7 +160,7 @@ def test_model(
 
 @hydra.main(version_base=None, config_path="../../", config_name="config")
 def main(cfg: DictConfig):
-    conf_thresh = 0.5
+    conf_thresh = cfg.train.conf_thresh
     iou_thresh = 0.5
     compute_maps = False
     to_visualize = True
