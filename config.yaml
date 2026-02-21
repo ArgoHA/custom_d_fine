@@ -1,14 +1,14 @@
-project_name: vis_drone # for wandb
-exp_name: baseline # experiment name
+project_name: TACO # for wandb
+exp_name: seg_l_high # experiment name
 
 exp: ${exp_name}_${now_dir}
 
-model_name: s # model size (n, s, m, l, x)
-task: detect
+model_name: l # model size (n, s, m, l, x)
+task: segment # detect or segment
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/vis_drone # project root with dataset and outputs
+  root: /home/argo/Desktop/Projects/taco # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
   pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
@@ -22,19 +22,69 @@ train:
   infer_path: ${train.root}/output/infer
 
   ### Configs ###
-  use_wandb: True
+  use_wandb: False
   device: cuda
   label_to_name: # dataset's classes
-    0: pedestrian
-    1: people
-    2: bicycle
-    3: car
-    4: van
-    5: truck
-    6: tricycle
-    7: awning-tricycle
-    8: bus
-    9: motor
+    0: aerosol
+    1: aluminium_blister_pack
+    2: aluminium_foil
+    3: battery
+    4: broken_glass
+    5: carded_blister_pack
+    6: cigarette
+    7: clear_plastic_bottle
+    8: corrugated_carton
+    9: crisp_packet
+    10: disposable_food_container
+    11: disposable_plastic_cup
+    12: drink_can
+    13: drink_carton
+    14: egg_carton
+    15: foam_cup
+    16: foam_food_container
+    17: food_can
+    18: food_waste
+    19: garbage_bag
+    20: glass_bottle
+    21: glass_cup
+    22: glass_jar
+    23: magazine_paper
+    24: meal_carton
+    25: metal_bottle_cap
+    26: metal_lid
+    27: normal_paper
+    28: other_carton
+    29: other_plastic
+    30: other_plastic_bottle
+    31: other_plastic_container
+    32: other_plastic_cup
+    33: other_plastic_wrapper
+    34: paper_bag
+    35: paper_cup
+    36: paper_straw
+    37: pizza_box
+    38: plastic_bottle_cap
+    39: plastic_film
+    40: plastic_glooves
+    41: plastic_lid
+    42: plastic_straw
+    43: plastic_utensils
+    44: polypropylene_bag
+    45: pop_tab
+    46: rope&strings
+    47: scrap_metal
+    48: shoe
+    49: single-use_carrier_bag
+    50: six_pack_rings
+    51: spread_tub
+    52: squeezable_tube
+    53: styrofoam_piece
+    54: tissues
+    55: toilet_tube
+    56: tupperware
+    57: unlabeled_litter
+    58: wrapping_paper
+
 
   use_one_class: False
 
@@ -56,13 +106,13 @@ train:
   amp_enabled: True # use automatic mixed precision
   clip_max_norm: 0.1 # gradient clipping
 
-  batch_size: 8 # physical, should fit on the device. In DDP used per GPU
+  batch_size: 6 # physical, should fit on the device. In DDP used per GPU
   b_accum_steps: 1 # grad accumulation (n * bs)
-  epochs: 75
+  epochs: 50
   early_stopping: 0 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
   num_workers: 12 # In DDP used per GPU
-  mask_batch_size: 1000 # number of images to process at once when computing mask metrics
+  mask_batch_size: 150 # number of images to process at once when computing mask metrics
 
   ### Validation ###
   conf_thresh: 0.5
@@ -120,11 +170,11 @@ train:
       backbone_lr: 0.00002  # 0.000025
       base_lr: 0.00015  # 0.00025
     l:
-      backbone_lr: 0.00000625 # 0.0000125
-      base_lr: 0.000125 # 0.00025
+      backbone_lr: 0.00001 # 0.00000625 - 0.0000125
+      base_lr: 0.00016 # 0.000125 - 0.00025
     x:
-      backbone_lr: 0.0000015  # 0.0000025
-      base_lr: 0.0001  # 0.00025
+      backbone_lr: 0.000002  # 0.0000015 - 0.0000025
+      base_lr: 0.0002  # 0.0001 - 0.00025
 
 
 split:
@@ -138,7 +188,7 @@ export: # TensorRT must be done on the inference device
   half: True # tensorrt, openvino
   max_batch_size: 1 # torch, tensorrt, openvino
   dynamic_input: False
-  ov_int8_max_drop: 0.01
+  ov_int8_max_drop: 0.025
 
 
 infer:
